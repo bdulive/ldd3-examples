@@ -28,6 +28,14 @@
 #include <linux/tty.h>
 #include <asm/atomic.h>
 #include <linux/list.h>
+#include <linux/cred.h>	  /* current_uid() */
+
+#include <linux/version.h>
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(4, 11, 0)
+#include <linux/sched/signal.h>	/* signal_pending() */
+#else
+#include <linux/sched.h>	/* signal_pending() */
+#endif
 
 #include "scull.h"        /* local definitions */
 
@@ -80,7 +88,7 @@ struct file_operations scull_sngl_fops = {
 	.llseek =     	scull_llseek,
 	.read =       	scull_read,
 	.write =      	scull_write,
-	.ioctl =      	scull_ioctl,
+	.unlocked_ioctl = scull_ioctl,
 	.open =       	scull_s_open,
 	.release =    	scull_s_release,
 };
@@ -94,8 +102,8 @@ struct file_operations scull_sngl_fops = {
 
 static struct scull_dev scull_u_device;
 static int scull_u_count;	/* initialized to 0 by default */
-static uid_t scull_u_owner;	/* initialized to 0 by default */
-static spinlock_t scull_u_lock = SPIN_LOCK_UNLOCKED;
+static kuid_t scull_u_owner;	/* initialized to 0 by default */
+static DEFINE_SPINLOCK(scull_u_lock);
 
 static int scull_u_open(struct inode *inode, struct file *filp)
 {
@@ -103,15 +111,15 @@ static int scull_u_open(struct inode *inode, struct file *filp)
 
 	spin_lock(&scull_u_lock);
 	if (scull_u_count && 
-			(scull_u_owner != current->uid) &&  /* allow user */
-			(scull_u_owner != current->euid) && /* allow whoever did su */
+			!uid_eq(scull_u_owner, current_uid()) &&  /* allow user */
+			!uid_eq(scull_u_owner, current_euid()) && /* allow whoever did su */
 			!capable(CAP_DAC_OVERRIDE)) { /* still allow root */
 		spin_unlock(&scull_u_lock);
 		return -EBUSY;   /* -EPERM would confuse the user */
 	}
 
 	if (scull_u_count == 0)
-		scull_u_owner = current->uid; /* grab it */
+		scull_u_owner = current_uid(); /* grab it */
 
 	scull_u_count++;
 	spin_unlock(&scull_u_lock);
@@ -142,7 +150,7 @@ struct file_operations scull_user_fops = {
 	.llseek =     scull_llseek,
 	.read =       scull_read,
 	.write =      scull_write,
-	.ioctl =      scull_ioctl,
+	.unlocked_ioctl = scull_ioctl,
 	.open =       scull_u_open,
 	.release =    scull_u_release,
 };
@@ -155,15 +163,15 @@ struct file_operations scull_user_fops = {
 
 static struct scull_dev scull_w_device;
 static int scull_w_count;	/* initialized to 0 by default */
-static uid_t scull_w_owner;	/* initialized to 0 by default */
+static kuid_t scull_w_owner;	/* initialized to 0 by default */
 static DECLARE_WAIT_QUEUE_HEAD(scull_w_wait);
-static spinlock_t scull_w_lock = SPIN_LOCK_UNLOCKED;
+static DEFINE_SPINLOCK(scull_w_lock);
 
 static inline int scull_w_available(void)
 {
 	return scull_w_count == 0 ||
-		scull_w_owner == current->uid ||
-		scull_w_owner == current->euid ||
+		uid_eq(scull_w_owner, current_uid()) ||
+		uid_eq(scull_w_owner, current_euid()) ||
 		capable(CAP_DAC_OVERRIDE);
 }
 
@@ -181,7 +189,7 @@ static int scull_w_open(struct inode *inode, struct file *filp)
 		spin_lock(&scull_w_lock);
 	}
 	if (scull_w_count == 0)
-		scull_w_owner = current->uid; /* grab it */
+		scull_w_owner = current_uid(); /* grab it */
 	scull_w_count++;
 	spin_unlock(&scull_w_lock);
 
@@ -215,7 +223,7 @@ struct file_operations scull_wusr_fops = {
 	.llseek =     scull_llseek,
 	.read =       scull_read,
 	.write =      scull_write,
-	.ioctl =      scull_ioctl,
+	.unlocked_ioctl = scull_ioctl,
 	.open =       scull_w_open,
 	.release =    scull_w_release,
 };
@@ -237,7 +245,7 @@ struct scull_listitem {
 
 /* The list of devices, and a lock to protect it */
 static LIST_HEAD(scull_c_list);
-static spinlock_t scull_c_lock = SPIN_LOCK_UNLOCKED;
+static DEFINE_SPINLOCK(scull_c_lock);
 
 /* A placeholder scull_dev which really just holds the cdev stuff. */
 static struct scull_dev scull_c_device;   
@@ -261,7 +269,7 @@ static struct scull_dev *scull_c_lookfor_device(dev_t key)
 	memset(lptr, 0, sizeof(struct scull_listitem));
 	lptr->key = key;
 	scull_trim(&(lptr->device)); /* initialize it */
-	init_MUTEX(&(lptr->device.sem));
+	mutex_init(&(lptr->device.mutex));
 
 	/* place it in the list */
 	list_add(&lptr->list, &scull_c_list);
@@ -314,7 +322,7 @@ struct file_operations scull_priv_fops = {
 	.llseek =   scull_llseek,
 	.read =     scull_read,
 	.write =    scull_write,
-	.ioctl =    scull_ioctl,
+	.unlocked_ioctl = scull_ioctl,
 	.open =     scull_c_open,
 	.release =  scull_c_release,
 };
@@ -332,7 +340,7 @@ static struct scull_adev_info {
 	{ "scullsingle", &scull_s_device, &scull_sngl_fops },
 	{ "sculluid", &scull_u_device, &scull_user_fops },
 	{ "scullwuid", &scull_w_device, &scull_wusr_fops },
-	{ "sullpriv", &scull_c_device, &scull_priv_fops }
+	{ "scullpriv", &scull_c_device, &scull_priv_fops }
 };
 #define SCULL_N_ADEVS 4
 
@@ -347,7 +355,7 @@ static void scull_access_setup (dev_t devno, struct scull_adev_info *devinfo)
 	/* Initialize the device structure */
 	dev->quantum = scull_quantum;
 	dev->qset = scull_qset;
-	init_MUTEX(&dev->sem);
+	mutex_init(&dev->mutex);
 
 	/* Do the cdev stuff. */
 	cdev_init(&dev->cdev, devinfo->fops);
@@ -356,10 +364,10 @@ static void scull_access_setup (dev_t devno, struct scull_adev_info *devinfo)
 	err = cdev_add (&dev->cdev, devno, 1);
         /* Fail gracefully if need be */
 	if (err) {
-		printk(KERN_NOTICE "Error %d adding %s\n", err, devinfo->name);
+		pr_notice("Error %d adding %s\n", err, devinfo->name);
 		kobject_put(&dev->cdev.kobj);
 	} else
-		printk(KERN_NOTICE "%s registered at %x\n", devinfo->name, devno);
+		pr_notice("%s registered at %x\n", devinfo->name, devno);
 }
 
 
@@ -370,7 +378,7 @@ int scull_access_init(dev_t firstdev)
 	/* Get our number space */
 	result = register_chrdev_region (firstdev, SCULL_N_ADEVS, "sculla");
 	if (result < 0) {
-		printk(KERN_WARNING "sculla: device number registration failed\n");
+		pr_warn("sculla: device number registration failed\n");
 		return 0;
 	}
 	scull_a_firstdev = firstdev;

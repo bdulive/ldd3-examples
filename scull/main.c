@@ -14,11 +14,10 @@
  *
  */
 
-#include <linux/config.h>
 #include <linux/module.h>
 #include <linux/moduleparam.h>
-#include <linux/init.h>
 
+#include <linux/init.h>
 #include <linux/kernel.h>	/* printk() */
 #include <linux/slab.h>		/* kmalloc() */
 #include <linux/fs.h>		/* everything... */
@@ -28,9 +27,7 @@
 #include <linux/fcntl.h>	/* O_ACCMODE */
 #include <linux/seq_file.h>
 #include <linux/cdev.h>
-
-#include <asm/system.h>		/* cli(), *_flags */
-#include <asm/uaccess.h>	/* copy_*_user */
+#include <linux/uaccess.h>	/* copy_*_user */
 
 #include "scull.h"		/* local definitions */
 
@@ -58,7 +55,7 @@ struct scull_dev *scull_devices;	/* allocated in scull_init_module */
 
 /*
  * Empty out the scull device; must be called with the device
- * semaphore held.
+ * mutex held.
  */
 int scull_trim(struct scull_dev *dev)
 {
@@ -83,39 +80,6 @@ int scull_trim(struct scull_dev *dev)
 	return 0;
 }
 #ifdef SCULL_DEBUG /* use proc only if debugging */
-/*
- * The proc filesystem: function to read and entry
- */
-
-int scull_read_procmem(char *buf, char **start, off_t offset,
-                   int count, int *eof, void *data)
-{
-	int i, j, len = 0;
-	int limit = count - 80; /* Don't print more than this */
-
-	for (i = 0; i < scull_nr_devs && len <= limit; i++) {
-		struct scull_dev *d = &scull_devices[i];
-		struct scull_qset *qs = d->data;
-		if (down_interruptible(&d->sem))
-			return -ERESTARTSYS;
-		len += sprintf(buf+len,"\nDevice %i: qset %i, q %i, sz %li\n",
-				i, d->qset, d->quantum, d->size);
-		for (; qs && len <= limit; qs = qs->next) { /* scan the list */
-			len += sprintf(buf + len, "  item at %p, qset at %p\n",
-					qs, qs->data);
-			if (qs->data && !qs->next) /* dump only the last item */
-				for (j = 0; j < d->qset; j++) {
-					if (qs->data[j])
-						len += sprintf(buf + len,
-								"    % 4i: %8p\n",
-								j, qs->data[j]);
-				}
-		}
-		up(&scull_devices[i].sem);
-	}
-	*eof = 1;
-	return len;
-}
 
 
 /*
@@ -153,7 +117,7 @@ static int scull_seq_show(struct seq_file *s, void *v)
 	struct scull_qset *d;
 	int i;
 
-	if (down_interruptible(&dev->sem))
+	if (mutex_lock_interruptible(&dev->mutex))
 		return -ERESTARTSYS;
 	seq_printf(s, "\nDevice %i: qset %i, q %i, sz %li\n",
 			(int) (dev - scull_devices), dev->qset,
@@ -167,7 +131,7 @@ static int scull_seq_show(struct seq_file *s, void *v)
 							i, d->data[i]);
 			}
 	}
-	up(&dev->sem);
+	mutex_unlock(&dev->mutex);
 	return 0;
 }
 	
@@ -209,18 +173,16 @@ static struct file_operations scull_proc_ops = {
 static void scull_create_proc(void)
 {
 	struct proc_dir_entry *entry;
-	create_proc_read_entry("scullmem", 0 /* default mode */,
-			NULL /* parent dir */, scull_read_procmem,
-			NULL /* client data */);
-	entry = create_proc_entry("scullseq", 0, NULL);
-	if (entry)
-		entry->proc_fops = &scull_proc_ops;
+
+	entry = proc_create("scullseq", 0, NULL, &scull_proc_ops);
+	if (!entry)
+		pr_warn("scull: create scullseq proc file failed\n");
+
 }
 
 static void scull_remove_proc(void)
 {
 	/* no problem if it was not registered */
-	remove_proc_entry("scullmem", NULL /* parent dir */);
 	remove_proc_entry("scullseq", NULL);
 }
 
@@ -244,10 +206,10 @@ int scull_open(struct inode *inode, struct file *filp)
 
 	/* now trim to 0 the length of the device if open was write-only */
 	if ( (filp->f_flags & O_ACCMODE) == O_WRONLY) {
-		if (down_interruptible(&dev->sem))
+		if (mutex_lock_interruptible(&dev->mutex))
 			return -ERESTARTSYS;
 		scull_trim(dev); /* ignore errors */
-		up(&dev->sem);
+		mutex_unlock(&dev->mutex);
 	}
 	return 0;          /* success */
 }
@@ -299,7 +261,7 @@ ssize_t scull_read(struct file *filp, char __user *buf, size_t count,
 	int item, s_pos, q_pos, rest;
 	ssize_t retval = 0;
 
-	if (down_interruptible(&dev->sem))
+	if (mutex_lock_interruptible(&dev->mutex))
 		return -ERESTARTSYS;
 	if (*f_pos >= dev->size)
 		goto out;
@@ -329,7 +291,7 @@ ssize_t scull_read(struct file *filp, char __user *buf, size_t count,
 	retval = count;
 
   out:
-	up(&dev->sem);
+	mutex_unlock(&dev->mutex);
 	return retval;
 }
 
@@ -343,7 +305,7 @@ ssize_t scull_write(struct file *filp, const char __user *buf, size_t count,
 	int item, s_pos, q_pos, rest;
 	ssize_t retval = -ENOMEM; /* value used in "goto out" statements */
 
-	if (down_interruptible(&dev->sem))
+	if (mutex_lock_interruptible(&dev->mutex))
 		return -ERESTARTSYS;
 
 	/* find listitem, qset index and offset in the quantum */
@@ -382,16 +344,15 @@ ssize_t scull_write(struct file *filp, const char __user *buf, size_t count,
 		dev->size = *f_pos;
 
   out:
-	up(&dev->sem);
+	mutex_unlock(&dev->mutex);
 	return retval;
 }
 
 /*
- * The ioctl() implementation
+ * The unlocked_ioctl() implementation
  */
 
-int scull_ioctl(struct inode *inode, struct file *filp,
-                 unsigned int cmd, unsigned long arg)
+long scull_ioctl(struct file *filp, unsigned int cmd, unsigned long arg)
 {
 
 	int err = 0, tmp;
@@ -553,7 +514,7 @@ struct file_operations scull_fops = {
 	.llseek =   scull_llseek,
 	.read =     scull_read,
 	.write =    scull_write,
-	.ioctl =    scull_ioctl,
+	.unlocked_ioctl = scull_ioctl,
 	.open =     scull_open,
 	.release =  scull_release,
 };
@@ -604,11 +565,10 @@ static void scull_setup_cdev(struct scull_dev *dev, int index)
     
 	cdev_init(&dev->cdev, &scull_fops);
 	dev->cdev.owner = THIS_MODULE;
-	dev->cdev.ops = &scull_fops;
 	err = cdev_add (&dev->cdev, devno, 1);
 	/* Fail gracefully if need be */
 	if (err)
-		printk(KERN_NOTICE "Error %d adding scull%d", err, index);
+		pr_notice("Error %d adding scull%d", err, index);
 }
 
 
@@ -630,7 +590,7 @@ int scull_init_module(void)
 		scull_major = MAJOR(dev);
 	}
 	if (result < 0) {
-		printk(KERN_WARNING "scull: can't get major %d\n", scull_major);
+		pr_warn("scull: can't get major %d\n", scull_major);
 		return result;
 	}
 
@@ -649,7 +609,7 @@ int scull_init_module(void)
 	for (i = 0; i < scull_nr_devs; i++) {
 		scull_devices[i].quantum = scull_quantum;
 		scull_devices[i].qset = scull_qset;
-		init_MUTEX(&scull_devices[i].sem);
+		mutex_init(&scull_devices[i].mutex);
 		scull_setup_cdev(&scull_devices[i], i);
 	}
 

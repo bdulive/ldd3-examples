@@ -4,11 +4,11 @@ module="scull"
 device="scull"
 mode="664"
 
-# Group: since distributions do it differently, look for wheel or use staff
-if grep -q '^staff:' /etc/group; then
-    group="staff"
+# Group: since distributions do it differently, look for plugdev or use staff
+if grep -q '^plugdev:' /etc/group; then
+    group="plugdev"
 else
-    group="wheel"
+    group="staff"
 fi
 
 # invoke insmod with all arguments we got

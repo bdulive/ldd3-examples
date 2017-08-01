@@ -24,9 +24,17 @@
 #include <linux/errno.h>	/* error codes */
 #include <linux/types.h>	/* size_t */
 #include <linux/fcntl.h>
+#include <linux/seq_file.h>
 #include <linux/poll.h>
 #include <linux/cdev.h>
-#include <asm/uaccess.h>
+#include <linux/uaccess.h>
+
+#include <linux/version.h>
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(4, 11, 0)
+#include <linux/sched/signal.h>	/* signal_pending() */
+#else
+#include <linux/sched.h>	/* signal_pending() */
+#endif
 
 #include "scull.h"		/* local definitions */
 
@@ -37,7 +45,7 @@ struct scull_pipe {
         char *rp, *wp;                     /* where to read, where to write */
         int nreaders, nwriters;            /* number of openings for r/w */
         struct fasync_struct *async_queue; /* asynchronous readers */
-        struct semaphore sem;              /* mutual exclusion semaphore */
+        struct mutex mutex;				   /* mutex */
         struct cdev cdev;                  /* Char device structure */
 };
 
@@ -65,13 +73,13 @@ static int scull_p_open(struct inode *inode, struct file *filp)
 	dev = container_of(inode->i_cdev, struct scull_pipe, cdev);
 	filp->private_data = dev;
 
-	if (down_interruptible(&dev->sem))
+	if (mutex_lock_interruptible(&dev->mutex))
 		return -ERESTARTSYS;
 	if (!dev->buffer) {
 		/* allocate the buffer */
 		dev->buffer = kmalloc(scull_p_buffer, GFP_KERNEL);
 		if (!dev->buffer) {
-			up(&dev->sem);
+			mutex_unlock(&dev->mutex);
 			return -ENOMEM;
 		}
 	}
@@ -84,7 +92,7 @@ static int scull_p_open(struct inode *inode, struct file *filp)
 		dev->nreaders++;
 	if (filp->f_mode & FMODE_WRITE)
 		dev->nwriters++;
-	up(&dev->sem);
+	mutex_unlock(&dev->mutex);
 
 	return nonseekable_open(inode, filp);
 }
@@ -97,7 +105,7 @@ static int scull_p_release(struct inode *inode, struct file *filp)
 
 	/* remove this filp from the asynchronously notified filp's */
 	scull_p_fasync(-1, filp, 0);
-	down(&dev->sem);
+	mutex_lock(&dev->mutex);
 	if (filp->f_mode & FMODE_READ)
 		dev->nreaders--;
 	if (filp->f_mode & FMODE_WRITE)
@@ -106,7 +114,7 @@ static int scull_p_release(struct inode *inode, struct file *filp)
 		kfree(dev->buffer);
 		dev->buffer = NULL; /* the other fields are not checked on open */
 	}
-	up(&dev->sem);
+	mutex_unlock(&dev->mutex);
 	return 0;
 }
 
@@ -120,18 +128,18 @@ static ssize_t scull_p_read (struct file *filp, char __user *buf, size_t count,
 {
 	struct scull_pipe *dev = filp->private_data;
 
-	if (down_interruptible(&dev->sem))
+	if (mutex_lock_interruptible(&dev->mutex))
 		return -ERESTARTSYS;
 
 	while (dev->rp == dev->wp) { /* nothing to read */
-		up(&dev->sem); /* release the lock */
+		mutex_unlock(&dev->mutex); /* release the lock */
 		if (filp->f_flags & O_NONBLOCK)
 			return -EAGAIN;
 		PDEBUG("\"%s\" reading: going to sleep\n", current->comm);
 		if (wait_event_interruptible(dev->inq, (dev->rp != dev->wp)))
 			return -ERESTARTSYS; /* signal: tell the fs layer to handle it */
 		/* otherwise loop, but first reacquire the lock */
-		if (down_interruptible(&dev->sem))
+		if (mutex_lock_interruptible(&dev->mutex))
 			return -ERESTARTSYS;
 	}
 	/* ok, data is there, return something */
@@ -140,13 +148,13 @@ static ssize_t scull_p_read (struct file *filp, char __user *buf, size_t count,
 	else /* the write pointer has wrapped, return data up to dev->end */
 		count = min(count, (size_t)(dev->end - dev->rp));
 	if (copy_to_user(buf, dev->rp, count)) {
-		up (&dev->sem);
+		mutex_unlock(&dev->mutex);
 		return -EFAULT;
 	}
 	dev->rp += count;
 	if (dev->rp == dev->end)
 		dev->rp = dev->buffer; /* wrapped */
-	up (&dev->sem);
+	mutex_unlock(&dev->mutex);
 
 	/* finally, awake any writers and return */
 	wake_up_interruptible(&dev->outq);
@@ -154,14 +162,14 @@ static ssize_t scull_p_read (struct file *filp, char __user *buf, size_t count,
 	return count;
 }
 
-/* Wait for space for writing; caller must hold device semaphore.  On
- * error the semaphore will be released before returning. */
+/* Wait for space for writing; caller must hold device mutex.  On
+ * error the mutex will be released before returning. */
 static int scull_getwritespace(struct scull_pipe *dev, struct file *filp)
 {
 	while (spacefree(dev) == 0) { /* full */
 		DEFINE_WAIT(wait);
 		
-		up(&dev->sem);
+		mutex_unlock(&dev->mutex);
 		if (filp->f_flags & O_NONBLOCK)
 			return -EAGAIN;
 		PDEBUG("\"%s\" writing: going to sleep\n",current->comm);
@@ -171,7 +179,7 @@ static int scull_getwritespace(struct scull_pipe *dev, struct file *filp)
 		finish_wait(&dev->outq, &wait);
 		if (signal_pending(current))
 			return -ERESTARTSYS; /* signal: tell the fs layer to handle it */
-		if (down_interruptible(&dev->sem))
+		if (mutex_lock_interruptible(&dev->mutex))
 			return -ERESTARTSYS;
 	}
 	return 0;
@@ -191,13 +199,13 @@ static ssize_t scull_p_write(struct file *filp, const char __user *buf, size_t c
 	struct scull_pipe *dev = filp->private_data;
 	int result;
 
-	if (down_interruptible(&dev->sem))
+	if (mutex_lock_interruptible(&dev->mutex))
 		return -ERESTARTSYS;
 
 	/* Make sure there's space to write */
 	result = scull_getwritespace(dev, filp);
 	if (result)
-		return result; /* scull_getwritespace called up(&dev->sem) */
+		return result; /* scull_getwritespace called up(&dev->mutex) */
 
 	/* ok, space is there, accept something */
 	count = min(count, (size_t)spacefree(dev));
@@ -207,13 +215,13 @@ static ssize_t scull_p_write(struct file *filp, const char __user *buf, size_t c
 		count = min(count, (size_t)(dev->rp - dev->wp - 1));
 	PDEBUG("Going to accept %li bytes to %p from %p\n", (long)count, dev->wp, buf);
 	if (copy_from_user(dev->wp, buf, count)) {
-		up (&dev->sem);
+		mutex_unlock(&dev->mutex);
 		return -EFAULT;
 	}
 	dev->wp += count;
 	if (dev->wp == dev->end)
 		dev->wp = dev->buffer; /* wrapped */
-	up(&dev->sem);
+	mutex_unlock(&dev->mutex);
 
 	/* finally, awake any reader */
 	wake_up_interruptible(&dev->inq);  /* blocked in read() and select() */
@@ -235,14 +243,14 @@ static unsigned int scull_p_poll(struct file *filp, poll_table *wait)
 	 * if "wp" is right behind "rp" and empty if the
 	 * two are equal.
 	 */
-	down(&dev->sem);
+	mutex_lock(&dev->mutex);
 	poll_wait(filp, &dev->inq,  wait);
 	poll_wait(filp, &dev->outq, wait);
 	if (dev->rp != dev->wp)
 		mask |= POLLIN | POLLRDNORM;	/* readable */
 	if (spacefree(dev))
 		mask |= POLLOUT | POLLWRNORM;	/* writable */
-	up(&dev->sem);
+	mutex_unlock(&dev->mutex);
 	return mask;
 }
 
@@ -261,46 +269,66 @@ static int scull_p_fasync(int fd, struct file *filp, int mode)
 
 /* FIXME this should use seq_file */
 #ifdef SCULL_DEBUG
-static void scullp_proc_offset(char *buf, char **start, off_t *offset, int *len)
+static void *scullp_seq_start(struct seq_file *s, loff_t *pos)
 {
-	if (*offset == 0)
-		return;
-	if (*offset >= *len) {	/* Not there yet */
-		*offset -= *len;
-		*len = 0;
-	}
-	else {			/* We're into the interesting stuff now */
-		*start = buf + *offset;
-		*offset = 0;
-	}
+	if (*pos >= scull_p_nr_devs)
+		return NULL;   
+	return scull_p_devices + *pos;
 }
 
-
-static int scull_read_p_mem(char *buf, char **start, off_t offset, int count,
-		int *eof, void *data)
+static void *scullp_seq_next(struct seq_file *s, void *v, loff_t *pos)
 {
-	int i, len;
-	struct scull_pipe *p;
-
-#define LIMIT (PAGE_SIZE-200)	/* don't print any more after this size */
-	*start = buf;
-	len = sprintf(buf, "Default buffersize is %i\n", scull_p_buffer);
-	for(i = 0; i<scull_p_nr_devs && len <= LIMIT; i++) {
-		p = &scull_p_devices[i];
-		if (down_interruptible(&p->sem))
-			return -ERESTARTSYS;
-		len += sprintf(buf+len, "\nDevice %i: %p\n", i, p);
-/*		len += sprintf(buf+len, "   Queues: %p %p\n", p->inq, p->outq);*/
-		len += sprintf(buf+len, "   Buffer: %p to %p (%i bytes)\n", p->buffer, p->end, p->buffersize);
-		len += sprintf(buf+len, "   rp %p   wp %p\n", p->rp, p->wp);
-		len += sprintf(buf+len, "   readers %i   writers %i\n", p->nreaders, p->nwriters);
-		up(&p->sem);
-		scullp_proc_offset(buf, start, &offset, &len);
-	}
-	*eof = (len <= LIMIT);
-	return len;
+	(*pos)++;
+	if (*pos >= scull_p_nr_devs)
+		return NULL;
+	return scull_p_devices + *pos;
 }
 
+static void scullp_seq_stop(struct seq_file *s, void *v)
+{
+	/* Actually, there's nothing to do here */
+}
+
+static int scullp_seq_show(struct seq_file *s, void *v)
+{
+	struct scull_pipe *dev = (struct scull_pipe *) v;
+
+	if (mutex_lock_interruptible(&dev->mutex))
+		return -ERESTARTSYS;
+
+	seq_printf(s, "\nDevice %i: %p\n", (int) (dev - scull_p_devices), dev);
+	seq_printf(s, "   Queues: %p %p\n", &dev->inq, &dev->outq);
+	seq_printf(s, "   Buffer: %p to %p (%i bytes)\n", dev->buffer, dev->end, dev->buffersize);
+	seq_printf(s, "   rp %p   wp %p\n", dev->rp, dev->wp);
+	seq_printf(s, "   readers %i   writers %i\n", dev->nreaders, dev->nwriters);
+
+	mutex_unlock(&dev->mutex);
+
+	return 0;
+}
+	
+/*
+ * Tie the sequence operators up.
+ */
+static struct seq_operations scullp_seq_ops = {
+	.start = scullp_seq_start,
+	.next  = scullp_seq_next,
+	.stop  = scullp_seq_stop,
+	.show  = scullp_seq_show
+};
+
+static int scullp_proc_open(struct inode *inode, struct file *file)
+{
+	return seq_open(file, &scullp_seq_ops);
+}
+
+static struct file_operations scullp_proc_ops = {
+	.owner   = THIS_MODULE,
+	.open    = scullp_proc_open,
+	.read    = seq_read,
+	.llseek  = seq_lseek,
+	.release = seq_release
+};
 
 #endif
 
@@ -316,7 +344,7 @@ struct file_operations scull_pipe_fops = {
 	.read =		scull_p_read,
 	.write =	scull_p_write,
 	.poll =		scull_p_poll,
-	.ioctl =	scull_ioctl,
+	.unlocked_ioctl =	scull_ioctl,
 	.open =		scull_p_open,
 	.release =	scull_p_release,
 	.fasync =	scull_p_fasync,
@@ -335,7 +363,7 @@ static void scull_p_setup_cdev(struct scull_pipe *dev, int index)
 	err = cdev_add (&dev->cdev, devno, 1);
 	/* Fail gracefully if need be */
 	if (err)
-		printk(KERN_NOTICE "Error %d adding scullpipe%d", err, index);
+		pr_notice("Error %d adding scullpipe%d", err, index);
 }
 
  
@@ -349,7 +377,7 @@ int scull_p_init(dev_t firstdev)
 
 	result = register_chrdev_region(firstdev, scull_p_nr_devs, "scullp");
 	if (result < 0) {
-		printk(KERN_NOTICE "Unable to get scullp region, error %d\n", result);
+		pr_notice("Unable to get scullp region, error %d\n", result);
 		return 0;
 	}
 	scull_p_devno = firstdev;
@@ -362,11 +390,12 @@ int scull_p_init(dev_t firstdev)
 	for (i = 0; i < scull_p_nr_devs; i++) {
 		init_waitqueue_head(&(scull_p_devices[i].inq));
 		init_waitqueue_head(&(scull_p_devices[i].outq));
-		init_MUTEX(&scull_p_devices[i].sem);
+		mutex_init(&scull_p_devices[i].mutex);
 		scull_p_setup_cdev(scull_p_devices + i, i);
 	}
 #ifdef SCULL_DEBUG
-	create_proc_read_entry("scullpipe", 0, NULL, scull_read_p_mem, NULL);
+	if(!proc_create("scullpseq", 0, NULL, &scullp_proc_ops))
+		pr_warn("scullp: create scullpseq proc file failed\n");
 #endif
 	return scull_p_nr_devs;
 }
@@ -380,7 +409,7 @@ void scull_p_cleanup(void)
 	int i;
 
 #ifdef SCULL_DEBUG
-	remove_proc_entry("scullpipe", NULL);
+	remove_proc_entry("scullpseq", NULL);
 #endif
 
 	if (!scull_p_devices)
