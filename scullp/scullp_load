@@ -4,10 +4,10 @@ device="scullp"
 mode="664"
 
 # Group: since distributions do it differently, look for wheel or use staff
-if grep '^staff:' /etc/group > /dev/null; then
-    group="staff"
+if grep '^plugdev:' /etc/group > /dev/null; then
+    group="plugdev"
 else
-    group="wheel"
+    group="staff"
 fi
 
 # remove stale nodes

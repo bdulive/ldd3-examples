@@ -15,6 +15,7 @@
 
 #include <linux/ioctl.h>
 #include <linux/cdev.h>
+#include <linux/semaphore.h>
 
 /*
  * Macros to help debugging
@@ -59,7 +60,7 @@ struct scullp_dev {
 	int order;                /* the current allocation order */
 	int qset;                 /* the current array size */
 	size_t size;              /* 32-bit will suffice */
-	struct semaphore sem;     /* Mutual exclusion */
+	struct mutex mutex;     /* Mutual exclusion */
 	struct cdev cdev;
 };
 
