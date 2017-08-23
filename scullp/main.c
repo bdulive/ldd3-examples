@@ -407,6 +407,7 @@ struct async_work {
 static void scullp_do_deferred_op(struct work_struct *work)
 {
 	struct async_work *stuff = container_of(work, struct async_work, dwork.work);
+	pr_info("%s: aio_complete\n", __func__);
 	aio_complete(stuff->iocb, stuff->result, 0);
 	kfree(stuff);
 }
@@ -419,15 +420,22 @@ static int scullp_defer_op(int write, struct kiocb *iocb, const struct iovec *io
 	int result;
 	int seg;
 
+	pr_info("%s(%d): nr_segs=%d, pos=%d\n", __func__, write, (int)nr_segs, (int)pos);	
+
 	/* Copy now while we can access the buffer */
 	for(seg = 0, result = 0; seg < nr_segs; seg++) {
+		pr_info("%s: iov[%d].iov_base=0x%lx, iov[%d].iov_len=%lu\n", 
+				__func__, seg, (unsigned long)iov[seg].iov_base, seg, iov[seg].iov_len);	
+
 		if (write)
 			result = scullp_write(iocb->ki_filp, iov[seg].iov_base, iov[seg].iov_len, &pos);
 		else
 			result = scullp_read(iocb->ki_filp, iov[seg].iov_base, iov[seg].iov_len, &pos);
 
-		if (result < 0)
-		  break;
+		if (result < 0) {
+			pr_warn("%s(%d): failed at seg %d\n", __func__, write, seg);	
+			break;
+		}
 
 		result += result;
 	}
@@ -451,12 +459,14 @@ static int scullp_defer_op(int write, struct kiocb *iocb, const struct iovec *io
 static ssize_t scullp_aio_read(struct kiocb *iocb, const struct iovec *iov, 
 								unsigned long nr_segs, loff_t pos)
 {
+	pr_warn("Enter: %s\n", __func__);
 	return scullp_defer_op(0, iocb, iov, nr_segs, pos);
 }
 
 static ssize_t scullp_aio_write(struct kiocb *iocb, const struct iovec *iov, 
 								unsigned long nr_segs, loff_t pos)
 {
+	pr_warn("Enter: %s\n", __func__);
 	return scullp_defer_op(1, iocb, iov, nr_segs, pos);
 }
 
