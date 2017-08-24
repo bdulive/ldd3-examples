@@ -21,6 +21,7 @@
 #include <linux/errno.h>	/* error codes */
 #include <asm/pgtable.h>
 #include <linux/fs.h>
+#include <linux/version.h>
 
 #include "scullp.h"		/* local definitions */
 
@@ -67,7 +68,11 @@ int scullp_vma_fault(struct vm_area_struct *vma, struct vm_fault *vmf)
 	int ret = VM_FAULT_SIGBUS;
 
 	mutex_lock(&dev->mutex);
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(4, 1, 0)
+	offset = ((unsigned long )vmf->address - vma->vm_start) + (vma->vm_pgoff << PAGE_SHIFT);
+#else
 	offset = ((unsigned long )vmf->virtual_address - vma->vm_start) + (vma->vm_pgoff << PAGE_SHIFT);
+#endif
 	if (offset >= dev->size) goto out; /* out of range */
 
 	/*
