@@ -166,8 +166,8 @@ struct scullp_dev *scullp_follow(struct scullp_dev *dev, int n)
  * Data management: read and write
  */
 
-ssize_t scullp_read (struct file *filp, char __user *buf, size_t count,
-                loff_t *f_pos)
+ssize_t scullp_do_read (struct file *filp, char __user *buf, size_t count,
+                loff_t *f_pos, int aio)
 {
 	struct scullp_dev *dev = filp->private_data; /* the first listitem */
 	struct scullp_dev *dptr;
@@ -198,10 +198,14 @@ ssize_t scullp_read (struct file *filp, char __user *buf, size_t count,
 	if (count > quantum - q_pos)
 		count = quantum - q_pos; /* read only up to the end of this quantum */
 
-	if (copy_to_user (buf, dptr->data[s_pos]+q_pos, count)) {
-		retval = -EFAULT;
-		goto nothing;
-	}
+	if (aio) 
+		memcpy (buf, dptr->data[s_pos]+q_pos, count);
+	else
+		if (copy_to_user (buf, dptr->data[s_pos]+q_pos, count)) {
+			retval = -EFAULT;
+			goto nothing;
+		}
+
 	mutex_unlock(&dev->mutex);
 
 	*f_pos += count;
@@ -212,10 +216,15 @@ ssize_t scullp_read (struct file *filp, char __user *buf, size_t count,
 	return retval;
 }
 
-
-
-ssize_t scullp_write (struct file *filp, const char __user *buf, size_t count,
+ssize_t scullp_read (struct file *filp, char __user *buf, size_t count,
                 loff_t *f_pos)
+{
+	return scullp_do_read(filp, buf, count, f_pos, 0);
+}
+
+
+ssize_t scullp_do_write (struct file *filp, const char __user *buf, size_t count,
+                loff_t *f_pos, int aio)
 {
 	struct scullp_dev *dev = filp->private_data;
 	struct scullp_dev *dptr;
@@ -251,11 +260,14 @@ ssize_t scullp_write (struct file *filp, const char __user *buf, size_t count,
 	}
 	if (count > quantum - q_pos)
 		count = quantum - q_pos; /* write only up to the end of this quantum */
-	if ((retval = copy_from_user (dptr->data[s_pos]+q_pos, buf, count)) != 0) {
-		pr_info("copy_from_user left %d", retval);
-		retval = -EFAULT;
-		goto nomem;
-	}
+
+	if(aio)
+		memcpy (dptr->data[s_pos]+q_pos, buf, count);
+	else
+		if (copy_from_user (dptr->data[s_pos]+q_pos, buf, count)) {
+			retval = -EFAULT;
+			goto nomem;
+		}
 	*f_pos += count;
  
     	/* update the size */
@@ -268,6 +280,13 @@ ssize_t scullp_write (struct file *filp, const char __user *buf, size_t count,
 	mutex_unlock(&dev->mutex);
 	return retval;
 }
+
+ssize_t scullp_write (struct file *filp, const char __user *buf, size_t count,
+                loff_t *f_pos)
+{
+	return scullp_do_write(filp, buf, count, f_pos, 0);
+}
+
 
 /*
  * The ioctl() implementation
@@ -407,19 +426,15 @@ struct async_work {
 /*
  * "Complete" an asynchronous operation.
  */
-
-#if LINUX_VERSION_CODE >= KERNEL_VERSION(4, 1, 0)
-
 static void scullp_do_deferred_op(struct work_struct *work)
 {
 	struct async_work *stuff = container_of(work, struct async_work, dwork.work);
-
-	pr_info("%s: ki_complete\n", __func__);
 
 	stuff->iocb->ki_complete(stuff->iocb, stuff->result, 0);
 
 	kfree(stuff);
 }
+
 
 static int scullp_defer_op(int write, struct kiocb *iocb, struct iov_iter *iter)
 {
@@ -432,37 +447,34 @@ static int scullp_defer_op(int write, struct kiocb *iocb, struct iov_iter *iter)
 	count = iov_iter_count(iter);
 	ppos = &iocb->ki_pos;
 
-	pr_info("%s(%d): pos=%lld, iter->iov_offset=%lu, iter->count=%lu, iovec->iov_base=0x%lx, iovec->iov_len=%lu, iter->nr_segs=%lu", 
-			__func__, write, *ppos, iter->iov_offset, iter->count, (unsigned long)iter->iov->iov_base, iter->iov->iov_len, iter->nr_segs);	
+	pr_info("%s(%d): pos=%lld, iter[iov_offset=%lu, count=%lu, nr_segs=%lu], "
+			"iovec[iov_base=0x%lx, iov_len=%lu]", 
+			__func__, write, *ppos, iter->iov_offset, iter->count, iter->nr_segs, 
+			(unsigned long)iter->iov->iov_base, iter->iov->iov_len);
 
 	buf = kmalloc(count, GFP_KERNEL);
 	if (!buf)
 	  return -ENOMEM;
-	
+
 	/* Copy now while we can access the buffer */
 	if (write) {
 		result = copy_from_iter(buf, count, iter);
-
 		if(result != count) {
 			pr_warn("copy_from_iter failed.");
 			kfree(buf);
 			return -EFAULT;
 		}
-		
-		buf[4000] = '\0';
-		pr_info("buf:%s", buf);
 
-		result = scullp_write(iocb->ki_filp, buf, count, ppos);
+		result = scullp_do_write(iocb->ki_filp, buf, count, ppos, 1);
 	} else {
-		result = copy_to_iter(buf, count, iter);
+		result = scullp_do_read(iocb->ki_filp, buf, count, ppos, 1);
 
+		result = copy_to_iter(buf, count, iter);
 		if(result != count) {
 			pr_warn("copy_to_iter failed.");
 			kfree(buf);
 			return -EFAULT;
 		}
-
-		result = scullp_read(iocb->ki_filp, buf, count, ppos);
 	}
 
 	kfree(buf);
@@ -482,84 +494,17 @@ static int scullp_defer_op(int write, struct kiocb *iocb, struct iov_iter *iter)
 	return -EIOCBQUEUED;
 }
 
+
 static ssize_t scullp_read_iter(struct kiocb *iocb, struct iov_iter *to)
 {
-	pr_warn("Enter: %s\n", __func__);
 	return scullp_defer_op(0, iocb, to);
 }
 
 static ssize_t scullp_write_iter(struct kiocb *iocb, struct iov_iter *from)
 {
-	pr_warn("Enter: %s\n", __func__);
 	return scullp_defer_op(1, iocb, from);
 }
 
-#else
-
-static void scullp_do_deferred_op(struct work_struct *work)
-{
-	struct async_work *stuff = container_of(work, struct async_work, dwork.work);
-	pr_info("%s: aio_complete\n", __func__);
-	aio_complete(stuff->iocb, stuff->result, 0);
-	kfree(stuff);
-}
-
-static int scullp_defer_op(int write, struct kiocb *iocb, const struct iovec *iov, 
-							unsigned long nr_segs, loff_t pos)
-{
-	struct async_work *stuff;
-	int result;
-	int seg;
-
-	pr_info("%s(%d): nr_segs=%d, pos=%d\n", __func__, write, (int)nr_segs, (int)pos);	
-
-	/* Copy now while we can access the buffer */
-	for(seg = 0, result = 0; seg < nr_segs; seg++) {
-		pr_info("%s: iov[%d].iov_base=0x%lx, iov[%d].iov_len=%lu\n", 
-				__func__, seg, (unsigned long)iov[seg].iov_base, seg, iov[seg].iov_len);	
-
-		if (write)
-			result = scullp_write(iocb->ki_filp, iov[seg].iov_base, iov[seg].iov_len, &pos);
-		else
-			result = scullp_read(iocb->ki_filp, iov[seg].iov_base, iov[seg].iov_len, &pos);
-
-		if (result < 0) {
-			pr_warn("%s(%d): failed at seg %d\n", __func__, write, seg);	
-			break;
-		}
-
-		result += result;
-	}
-
-	/* If this is a synchronous IOCB, we return our status now. */
-	if (is_sync_kiocb(iocb))
-		return result;
-
-	/* Otherwise defer the completion for a few milliseconds. */
-	stuff = kmalloc (sizeof (*stuff), GFP_KERNEL);
-	if (stuff == NULL)
-		return result; /* No memory, just complete now */
-	stuff->iocb = iocb;
-	stuff->result = result;
-	INIT_DELAYED_WORK(&stuff->dwork, scullp_do_deferred_op);
-	schedule_delayed_work(&stuff->dwork, HZ/100);
-	return -EIOCBQUEUED;
-}
-
-static ssize_t scullp_aio_read(struct kiocb *iocb, const struct iovec *iov, 
-								unsigned long nr_segs, loff_t pos)
-{
-	pr_warn("Enter: %s\n", __func__);
-	return scullp_defer_op(0, iocb, iov, nr_segs, pos);
-}
-
-static ssize_t scullp_aio_write(struct kiocb *iocb, const struct iovec *iov, 
-								unsigned long nr_segs, loff_t pos)
-{
-	pr_warn("Enter: %s\n", __func__);
-	return scullp_defer_op(1, iocb, iov, nr_segs, pos);
-}
-#endif
 
  
 /*
@@ -581,13 +526,8 @@ struct file_operations scullp_fops = {
 	.mmap =	     scullp_mmap,
 	.open =	     scullp_open,
 	.release =   scullp_release,
-#if LINUX_VERSION_CODE >= KERNEL_VERSION(4, 1, 0)
 	.read_iter = scullp_read_iter,
 	.write_iter = scullp_write_iter,
-#else
-	.aio_read =  scullp_aio_read,
-	.aio_write = scullp_aio_write,
-#endif
 };
 
 int scullp_trim(struct scullp_dev *dev)
