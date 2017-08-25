@@ -29,7 +29,7 @@
 #include <linux/interrupt.h> /* tasklets */
 #include <linux/seq_file.h>
 
-#include "ji.h"
+#include "../include/common.h"
 
 MODULE_LICENSE("Dual BSD/GPL");
 

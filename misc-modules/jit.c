@@ -32,7 +32,7 @@
 
 #include <asm/hardirq.h>
 
-#include "ji.h"
+#include "../include/common.h"
 
 /*
  * This module is a silly one: it only embeds short code fragments
@@ -58,9 +58,9 @@ enum jit_files {
  * This function prints one line of data, after sleeping one second.
  * It can sleep in different ways, according to the data pointer
  */
-static int jit_fn(struct seq_file *s, void *v)
+static int jit_fn(struct seq_file *m, void *v)
 {
-	void *data = s->private;
+	void *data = m->private;
 	unsigned long j0, j1; /* jiffies */
 	wait_queue_head_t wait;
 
@@ -88,7 +88,7 @@ static int jit_fn(struct seq_file *s, void *v)
 	}
 	j1 = jiffies; /* actual value after we delayed */
 
-	seq_printf(s, "%9li %9li\n", j0, j1);
+	seq_printf(m, "%9li %9li\n", j0, j1);
 
 	return 0;
 }
@@ -96,7 +96,7 @@ static int jit_fn(struct seq_file *s, void *v)
 /*
  * This file, on the other hand, returns the current time forever
  */
-static int jit_currentime(struct seq_file *s, void *v)
+static int jit_currentime(struct seq_file *m, void *v)
 {
 	struct timeval tv1;
 	struct timespec tv2;
@@ -110,7 +110,7 @@ static int jit_currentime(struct seq_file *s, void *v)
 	tv2 = current_kernel_time();
 
 	/* print */
-	seq_printf(s, "0x%08lx 0x%016Lx %10i.%06i\n"
+	seq_printf(m, "0x%08lx 0x%016Lx %10i.%06i\n"
 		       "%41i.%09i\n",
 		       j1, j2,
 		       (int) tv1.tv_sec, (int) tv1.tv_usec,
@@ -133,7 +133,7 @@ struct jit_data {
 	int hi; /* tasklet or tasklet_hi */
 	wait_queue_head_t wait;
 	unsigned long prevjiffies;
-	struct seq_file *s;
+	struct seq_file *m;
 	int loops;
 };
 #define JIT_ASYNC_LOOPS 5
@@ -142,7 +142,7 @@ void jit_timer_fn(unsigned long arg)
 {
 	struct jit_data *data = (struct jit_data *)arg;
 	unsigned long j = jiffies;
-	seq_printf(data->s, "%9li  %3li     %i    %6i   %i   %s\n",
+	seq_printf(data->m, "%9li  %3li     %i    %6i   %i   %s\n",
 			     j, j - data->prevjiffies, in_interrupt() ? 1 : 0,
 			     current->pid, smp_processor_id(), current->comm);
 
@@ -156,7 +156,7 @@ void jit_timer_fn(unsigned long arg)
 }
 
 /* the /proc function: allocate everything to allow concurrency */
-static int jit_timer(struct seq_file *s, void *v)
+static int jit_timer(struct seq_file *m, void *v)
 {
 	struct jit_data *data;
 	unsigned long j = jiffies;
@@ -169,14 +169,14 @@ static int jit_timer(struct seq_file *s, void *v)
 	init_waitqueue_head (&data->wait);
 
 	/* write the first lines in the buffer */
-	seq_printf(s, "   time   delta  inirq    pid   cpu command\n");
-	seq_printf(s, "%9li  %3li     %i    %6i   %i   %s\n",
+	seq_printf(m, "   time   delta  inirq    pid   cpu command\n");
+	seq_printf(m, "%9li  %3li     %i    %6i   %i   %s\n",
 			j, 0L, in_interrupt() ? 1 : 0,
 			current->pid, smp_processor_id(), current->comm);
 
 	/* fill the data for our timer function */
 	data->prevjiffies = j;
-	data->s = s;
+	data->m = m;
 	data->loops = JIT_ASYNC_LOOPS;
 	
 	/* register the timer */
@@ -198,7 +198,7 @@ void jit_tasklet_fn(unsigned long arg)
 {
 	struct jit_data *data = (struct jit_data *)arg;
 	unsigned long j = jiffies;
-	seq_printf(data->s, "%9li  %3li     %i    %6i   %i   %s\n",
+	seq_printf(data->m, "%9li  %3li     %i    %6i   %i   %s\n",
 			     j, j - data->prevjiffies, in_interrupt() ? 1 : 0,
 			     current->pid, smp_processor_id(), current->comm);
 
@@ -214,11 +214,11 @@ void jit_tasklet_fn(unsigned long arg)
 }
 
 /* the /proc function: allocate everything to allow concurrency */
-static int jit_tasklet(struct seq_file *s, void *v)
+static int jit_tasklet(struct seq_file *m, void *v)
 {
 	struct jit_data *data;
 	unsigned long j = jiffies;
-	long hi = (long)s->private;
+	long hi = (long)m->private;
 
 	data = kmalloc(sizeof(*data), GFP_KERNEL);
 	if (!data)
@@ -227,14 +227,14 @@ static int jit_tasklet(struct seq_file *s, void *v)
 	init_waitqueue_head (&data->wait);
 
 	/* write the first lines in the buffer */
-	seq_printf(s, "   time   delta  inirq    pid   cpu command\n");
-	seq_printf(s, "%9li  %3li     %i    %6i   %i   %s\n",
+	seq_printf(m, "   time   delta  inirq    pid   cpu command\n");
+	seq_printf(m, "%9li  %3li     %i    %6i   %i   %s\n",
 			j, 0L, in_interrupt() ? 1 : 0,
 			current->pid, smp_processor_id(), current->comm);
 
 	/* fill the data for our tasklet function */
 	data->prevjiffies = j;
-	data->s = s;
+	data->m = m;
 	data->loops = JIT_ASYNC_LOOPS;
 	
 	/* register the tasklet */
