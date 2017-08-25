@@ -57,7 +57,6 @@ void scullp_vma_close(struct vm_area_struct *vma)
  * is individually decreased, and would drop to 0.
  */
 
-//struct page *scullp_vma_nopage(struct vm_area_struct *vma, unsigned long address, int *type)
 int scullp_vma_fault(struct vm_area_struct *vma, struct vm_fault *vmf)
 {
 	unsigned long offset;

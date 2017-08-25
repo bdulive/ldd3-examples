@@ -61,7 +61,7 @@ void scullp_cleanup(void);
 int scullp_read_procmem(struct seq_file *m, void *v)
 {
 	int i, j, order, qset;
-	int limit = PAGE_SIZE - 80; /* Don't print more than this */
+	int limit = m->size - 80; /* Don't print more than this */
 	struct scullp_dev *d;
 
 	for(i = 0; i < scullp_devs; i++) {
