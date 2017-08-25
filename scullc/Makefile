@@ -1,6 +1,6 @@
 
 # Comment/uncomment the following line to enable/disable debugging
-#DEBUG = y
+DEBUG = y
 
 
 ifeq ($(DEBUG),y)
@@ -9,7 +9,7 @@ else
   DEBFLAGS = -O2
 endif
 
-CFLAGS += $(DEBFLAGS) -I$(LDDINC)
+ccflags-y += $(DEBFLAGS) -I$(LDDINC)
 
 TARGET = scullc
 
@@ -39,7 +39,7 @@ clean:
 
 
 depend .depend dep:
-	$(CC) $(CFLAGS) -M *.c > .depend
+	$(CC) $(ccflags-y) -M *.c > .depend
 
 ifeq (.depend,$(wildcard .depend))
 include .depend

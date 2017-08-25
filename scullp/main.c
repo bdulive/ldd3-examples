@@ -25,9 +25,8 @@
 #include <linux/types.h>	/* size_t */
 #include <linux/proc_fs.h>
 #include <linux/fcntl.h>	/* O_ACCMODE */
-#include <linux/aio.h>
-#include <linux/uio.h>
 #include <linux/seq_file.h>
+#include <linux/uio.h>
 #include <asm/uaccess.h>
 #include "scullp.h"		/* local definitions */
 
