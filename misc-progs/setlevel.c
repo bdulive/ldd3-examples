@@ -22,12 +22,14 @@
 #include <stdlib.h>
 #include <string.h>
 #include <errno.h>
-/* #include <unistd.h> */ /* conflicting on the alpha */
-#define __LIBRARY__ /* _syscall3 and friends are only available through this */
-#include <linux/unistd.h>
+#include <unistd.h>
+#include <sys/syscall.h>
 
 /* define the system call, to override the library function */
-_syscall3(int, syslog, int, type, char *, bufp, int, len);
+inline int syslog(int type, char *bufp, int len)
+{
+	syscall(__NR_syslog, type, bufp, len);
+}
 
 int main(int argc, char **argv)
 {
