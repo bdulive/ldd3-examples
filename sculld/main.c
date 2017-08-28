@@ -15,7 +15,6 @@
  * $Id: _main.c.in,v 1.21 2004/10/14 20:11:39 corbet Exp $
  */
 
-#include <linux/config.h>
 #include <linux/module.h>
 #include <linux/moduleparam.h>
 #include <linux/init.h>
@@ -26,10 +25,12 @@
 #include <linux/types.h>	/* size_t */
 #include <linux/proc_fs.h>
 #include <linux/fcntl.h>	/* O_ACCMODE */
-#include <linux/aio.h>
+#include <linux/seq_file.h>
+#include <linux/uio.h>
 #include <asm/uaccess.h>
 #include "sculld.h"		/* local definitions */
 
+#include "../include/common.h"
 
 int sculld_major =   SCULLD_MAJOR;
 int sculld_devs =    SCULLD_DEVS;	/* number of bare sculld devices */
@@ -67,59 +68,39 @@ static struct ldd_driver sculld_driver = {
  * The proc filesystem: function to read and entry
  */
 
-void sculld_proc_offset(char *buf, char **start, off_t *offset, int *len)
-{
-	if (*offset == 0)
-		return;
-	if (*offset >= *len) {
-		/* Not there yet */
-		*offset -= *len;
-		*len = 0;
-	} else {
-		/* We're into the interesting stuff now */
-		*start = buf + *offset;
-		*offset = 0;
-	}
-}
-
 /* FIXME: Do we need this here??  It be ugly  */
-int sculld_read_procmem(char *buf, char **start, off_t offset,
-                   int count, int *eof, void *data)
+int sculld_read_procmem(struct seq_file *m, void *v)
 {
-	int i, j, order, qset, len = 0;
-	int limit = count - 80; /* Don't print more than this */
+	int i, j, order, qset;
+	int limit = m->size - 80; /* Don't print more than this */
 	struct sculld_dev *d;
 
-	*start = buf;
 	for(i = 0; i < sculld_devs; i++) {
 		d = &sculld_devices[i];
-		if (down_interruptible (&d->sem))
+		if (mutex_lock_interruptible(&d->mutex))
 			return -ERESTARTSYS;
 		qset = d->qset;  /* retrieve the features of each device */
 		order = d->order;
-		len += sprintf(buf+len,"\nDevice %i: qset %i, order %i, sz %li\n",
+		seq_printf(m, "\nDevice %i: qset %i, order %i, sz %li\n",
 				i, qset, order, (long)(d->size));
 		for (; d; d = d->next) { /* scan the list */
-			len += sprintf(buf+len,"  item at %p, qset at %p\n",d,d->data);
-			sculld_proc_offset (buf, start, &offset, &len);
-			if (len > limit)
+			seq_printf(m, "  item at %p, qset at %p\n",d,d->data);
+			if (m->count > limit)
 				goto out;
 			if (d->data && !d->next) /* dump only the last item - save space */
 				for (j = 0; j < qset; j++) {
 					if (d->data[j])
-						len += sprintf(buf+len,"    % 4i:%8p\n",j,d->data[j]);
-					sculld_proc_offset (buf, start, &offset, &len);
-					if (len > limit)
+						seq_printf(m, "    % 4i:%8p\n",j,d->data[j]);
+					if (m->count > limit)
 						goto out;
 				}
 		}
 	  out:
-		up (&sculld_devices[i].sem);
-		if (len > limit)
+		mutex_unlock(&sculld_devices[i].mutex);
+		if (m->count > limit)
 			break;
 	}
-	*eof = 1;
-	return len;
+	return 0;
 }
 
 #endif /* SCULLD_USE_PROC */
@@ -137,10 +118,10 @@ int sculld_open (struct inode *inode, struct file *filp)
 
     	/* now trim to 0 the length of the device if open was write-only */
 	if ( (filp->f_flags & O_ACCMODE) == O_WRONLY) {
-		if (down_interruptible (&dev->sem))
+		if (mutex_lock_interruptible(&dev->mutex))
 			return -ERESTARTSYS;
 		sculld_trim(dev); /* ignore errors */
-		up (&dev->sem);
+		mutex_unlock(&dev->mutex);
 	}
 
 	/* and use filp->private_data to point to the device data */
@@ -174,8 +155,8 @@ struct sculld_dev *sculld_follow(struct sculld_dev *dev, int n)
  * Data management: read and write
  */
 
-ssize_t sculld_read (struct file *filp, char __user *buf, size_t count,
-                loff_t *f_pos)
+ssize_t sculld_do_read (struct file *filp, char __user *buf, size_t count,
+                loff_t *f_pos, int aio)
 {
 	struct sculld_dev *dev = filp->private_data; /* the first listitem */
 	struct sculld_dev *dptr;
@@ -185,7 +166,7 @@ ssize_t sculld_read (struct file *filp, char __user *buf, size_t count,
 	int item, s_pos, q_pos, rest;
 	ssize_t retval = 0;
 
-	if (down_interruptible (&dev->sem))
+	if (mutex_lock_interruptible(&dev->mutex))
 		return -ERESTARTSYS;
 	if (*f_pos > dev->size) 
 		goto nothing;
@@ -206,24 +187,34 @@ ssize_t sculld_read (struct file *filp, char __user *buf, size_t count,
 	if (count > quantum - q_pos)
 		count = quantum - q_pos; /* read only up to the end of this quantum */
 
-	if (copy_to_user (buf, dptr->data[s_pos]+q_pos, count)) {
-		retval = -EFAULT;
-		goto nothing;
-	}
-	up (&dev->sem);
+	if (aio) 
+		memcpy (buf, dptr->data[s_pos]+q_pos, count);
+	else
+		if (copy_to_user (buf, dptr->data[s_pos]+q_pos, count)) {
+			retval = -EFAULT;
+			goto nothing;
+		}
+
+	mutex_unlock(&dev->mutex);
 
 	*f_pos += count;
 	return count;
 
   nothing:
-	up (&dev->sem);
+	mutex_unlock(&dev->mutex);
 	return retval;
+}
+
+ssize_t sculld_read (struct file *filp, char __user *buf, size_t count,
+                loff_t *f_pos)
+{
+	return sculld_do_read(filp, buf, count, f_pos, 0);
 }
 
 
 
-ssize_t sculld_write (struct file *filp, const char __user *buf, size_t count,
-                loff_t *f_pos)
+ssize_t sculld_do_write (struct file *filp, const char __user *buf, size_t count,
+                loff_t *f_pos, int aio)
 {
 	struct sculld_dev *dev = filp->private_data;
 	struct sculld_dev *dptr;
@@ -233,7 +224,7 @@ ssize_t sculld_write (struct file *filp, const char __user *buf, size_t count,
 	int item, s_pos, q_pos, rest;
 	ssize_t retval = -ENOMEM; /* our most likely error */
 
-	if (down_interruptible (&dev->sem))
+	if (mutex_lock_interruptible(&dev->mutex))
 		return -ERESTARTSYS;
 
 	/* find listitem, qset index and offset in the quantum */
@@ -259,29 +250,40 @@ ssize_t sculld_write (struct file *filp, const char __user *buf, size_t count,
 	}
 	if (count > quantum - q_pos)
 		count = quantum - q_pos; /* write only up to the end of this quantum */
-	if (copy_from_user (dptr->data[s_pos]+q_pos, buf, count)) {
-		retval = -EFAULT;
-		goto nomem;
-	}
+
+	if(aio)
+		memcpy (dptr->data[s_pos]+q_pos, buf, count);
+	else
+		if (copy_from_user (dptr->data[s_pos]+q_pos, buf, count)) {
+			retval = -EFAULT;
+			goto nomem;
+		}
+
 	*f_pos += count;
  
     	/* update the size */
 	if (dev->size < *f_pos)
 		dev->size = *f_pos;
-	up (&dev->sem);
+	mutex_unlock(&dev->mutex);
 	return count;
 
   nomem:
-	up (&dev->sem);
+	mutex_unlock(&dev->mutex);
 	return retval;
 }
+
+ssize_t sculld_write (struct file *filp, const char __user *buf, size_t count,
+                loff_t *f_pos)
+{
+	return sculld_do_write(filp, buf, count, f_pos, 0);
+}
+
 
 /*
  * The ioctl() implementation
  */
 
-int sculld_ioctl (struct inode *inode, struct file *filp,
-                 unsigned int cmd, unsigned long arg)
+long sculld_ioctl(struct file *filp, unsigned int cmd, unsigned long arg)
 {
 
 	int err = 0, ret = 0, tmp;
@@ -409,31 +411,64 @@ loff_t sculld_llseek (struct file *filp, loff_t off, int whence)
 struct async_work {
 	struct kiocb *iocb;
 	int result;
-	struct work_struct work;
+	struct delayed_work dwork;
 };
 
 /*
  * "Complete" an asynchronous operation.
  */
-static void sculld_do_deferred_op(void *p)
+static void sculld_do_deferred_op(struct work_struct *work)
 {
-	struct async_work *stuff = (struct async_work *) p;
-	aio_complete(stuff->iocb, stuff->result, 0);
+	struct async_work *stuff = container_of(work, struct async_work, dwork.work);
+
+	stuff->iocb->ki_complete(stuff->iocb, stuff->result, 0);
+
 	kfree(stuff);
 }
 
 
-static int sculld_defer_op(int write, struct kiocb *iocb, char __user *buf,
-		size_t count, loff_t pos)
+static int sculld_defer_op(int write, struct kiocb *iocb, struct iov_iter *iter)
 {
 	struct async_work *stuff;
 	int result;
+	int count;
+	loff_t *ppos;
+	char *buf;
+
+	count = iov_iter_count(iter);
+	ppos = &iocb->ki_pos;
+
+	pr_info("%s(%d): pos=%lld, iter[iov_offset=%lu, count=%lu, nr_segs=%lu], "
+			"iovec[iov_base=0x%lx, iov_len=%lu]", 
+			__func__, write, *ppos, iter->iov_offset, iter->count, iter->nr_segs, 
+			(unsigned long)iter->iov->iov_base, iter->iov->iov_len);
+
+	buf = kmalloc(count, GFP_KERNEL);
+	if (!buf)
+	  return -ENOMEM;
 
 	/* Copy now while we can access the buffer */
-	if (write)
-		result = sculld_write(iocb->ki_filp, buf, count, &pos);
-	else
-		result = sculld_read(iocb->ki_filp, buf, count, &pos);
+	if (write) {
+		result = copy_from_iter(buf, count, iter);
+		if(result != count) {
+			pr_warn("copy_from_iter failed.");
+			kfree(buf);
+			return -EFAULT;
+		}
+
+		result = sculld_do_write(iocb->ki_filp, buf, count, ppos, 1);
+	} else {
+		result = sculld_do_read(iocb->ki_filp, buf, count, ppos, 1);
+
+		result = copy_to_iter(buf, count, iter);
+		if(result != count) {
+			pr_warn("copy_to_iter failed.");
+			kfree(buf);
+			return -EFAULT;
+		}
+	}
+
+	kfree(buf);
 
 	/* If this is a synchronous IOCB, we return our status now. */
 	if (is_sync_kiocb(iocb))
@@ -445,22 +480,20 @@ static int sculld_defer_op(int write, struct kiocb *iocb, char __user *buf,
 		return result; /* No memory, just complete now */
 	stuff->iocb = iocb;
 	stuff->result = result;
-	INIT_WORK(&stuff->work, sculld_do_deferred_op, stuff);
-	schedule_delayed_work(&stuff->work, HZ/100);
+	INIT_DELAYED_WORK(&stuff->dwork, sculld_do_deferred_op);
+	schedule_delayed_work(&stuff->dwork, HZ/100);
 	return -EIOCBQUEUED;
 }
 
 
-static ssize_t sculld_aio_read(struct kiocb *iocb, char __user *buf, size_t count,
-		loff_t pos)
+static ssize_t sculld_read_iter(struct kiocb *iocb, struct iov_iter *to)
 {
-	return sculld_defer_op(0, iocb, buf, count, pos);
+	return sculld_defer_op(0, iocb, to);
 }
 
-static ssize_t sculld_aio_write(struct kiocb *iocb, const char __user *buf,
-		size_t count, loff_t pos)
+static ssize_t sculld_write_iter(struct kiocb *iocb, struct iov_iter *from)
 {
-	return sculld_defer_op(1, iocb, (char __user *) buf, count, pos);
+	return sculld_defer_op(1, iocb, from);
 }
 
 
@@ -480,12 +513,12 @@ struct file_operations sculld_fops = {
 	.llseek =    sculld_llseek,
 	.read =	     sculld_read,
 	.write =     sculld_write,
-	.ioctl =     sculld_ioctl,
+	.unlocked_ioctl =     sculld_ioctl,
 	.mmap =	     sculld_mmap,
 	.open =	     sculld_open,
 	.release =   sculld_release,
-	.aio_read =  sculld_aio_read,
-	.aio_write = sculld_aio_write,
+	.read_iter = sculld_read_iter,
+	.write_iter = sculld_write_iter,
 };
 
 int sculld_trim(struct sculld_dev *dev)
@@ -532,7 +565,7 @@ static void sculld_setup_cdev(struct sculld_dev *dev, int index)
 		printk(KERN_NOTICE "Error %d adding scull%d", err, index);
 }
 
-static ssize_t sculld_show_dev(struct device *ddev, char *buf)
+static ssize_t sculld_show_dev(struct device *ddev, struct device_attribute *attr, char *buf)
 {
 	struct sculld_dev *dev = ddev->driver_data;
 
@@ -551,6 +584,10 @@ static void sculld_register_dev(struct sculld_dev *dev, int index)
 	device_create_file(&dev->ldev.dev, &dev_attr_dev);
 }
 
+
+#ifdef SCULLD_USE_PROC
+DEFINE_SINGLE_SEQOPS(sculld_read_procmem);
+#endif
 
 /*
  * Finally, the module stuff
@@ -591,7 +628,7 @@ int sculld_init(void)
 	for (i = 0; i < sculld_devs; i++) {
 		sculld_devices[i].order = sculld_order;
 		sculld_devices[i].qset = sculld_qset;
-		sema_init (&sculld_devices[i].sem, 1);
+		mutex_init(&sculld_devices[i].mutex);
 		sculld_setup_cdev(sculld_devices + i, i);
 		sculld_register_dev(sculld_devices + i, i);
 	}
