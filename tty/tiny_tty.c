@@ -37,14 +37,13 @@ MODULE_LICENSE("GPL");
 
 #define DELAY_TIME		HZ * 2	/* 2 seconds per character */
 #define TINY_DATA_CHARACTER	't'
+#define TINY_DATA_STRING	"I'm tiny data..."
 
 #define TINY_TTY_MAJOR		240	/* experimental range */
 #define TINY_TTY_MINORS		4	/* only have 4 devices */
 
 struct tiny_serial {
-	struct tty_struct	*tty;		/* pointer to the tty for this device */
-	int			open_count;	/* number of times this port has been opened */
-	struct mutex	mutex;		/* locks this structure */
+	struct tty_port		port;		/* pointer to the tty port for this device */
 	struct timer_list	*timer;
 
 	/* for tiocmget and tiocmset functions */
@@ -63,30 +62,65 @@ static struct tiny_serial *tiny_table[TINY_TTY_MINORS];	/* initially all NULL */
 static void tiny_timer(unsigned long timer_data)
 {
 	struct tiny_serial *tiny = (struct tiny_serial *)timer_data;
-	struct tty_struct *tty;
-	char data[1] = {TINY_DATA_CHARACTER};
-	int data_size = 1;
+	struct tty_port *pport;
+	char data[sizeof(TINY_DATA_STRING)] = TINY_DATA_STRING;
+	int data_size = sizeof(data) / sizeof(*data);
 
 	if (!tiny)
 		return;
 
-	tty = tiny->tty;
+	pport = &tiny->port;
 
 	/* send the data to the tty layer for users to read.  This doesn't
 	 * actually push the data through unless tty->low_latency is set */
-	tty_insert_flip_string(tty->port, data, data_size);
+	tty_insert_flip_string(pport, data, data_size);
 
-	tty_flip_buffer_push(tty->port);
+	tty_flip_buffer_push(pport);
 
 	/* resubmit the timer again */
 	tiny->timer->expires = jiffies + DELAY_TIME;
 	add_timer(tiny->timer);
 }
 
+static int tiny_activate(struct tty_port *port, struct tty_struct *tty)
+{
+	struct tiny_serial *tiny = container_of(port, struct tiny_serial, port);
+	struct timer_list *timer;
+
+	/* this is the first time this port is opened */
+	/* do any hardware initialization needed here */
+
+	/* create our timer and submit it */
+	if (!tiny->timer) {
+		timer = kmalloc(sizeof(*timer), GFP_KERNEL);
+		if (!timer) {
+			return -ENOMEM;
+		}
+		init_timer(timer);
+		tiny->timer = timer;
+	}
+	tiny->timer->data = (unsigned long )tiny;
+	tiny->timer->expires = jiffies + DELAY_TIME;
+	tiny->timer->function = tiny_timer;
+	add_timer(tiny->timer);
+
+	return 0;
+}
+
+static void tiny_shutdown(struct tty_port *port)
+{
+	struct tiny_serial *tiny = container_of(port, struct tiny_serial, port);
+
+	/* The port is being closed by the last user. */
+	/* Do any hardware specific stuff here */
+
+	/* shut down our timer */
+	del_timer(tiny->timer);
+}
+
 static int tiny_open(struct tty_struct *tty, struct file *file)
 {
 	struct tiny_serial *tiny;
-	struct timer_list *timer;
 	int index;
 
 	/* initialize the pointer in case something fails */
@@ -95,68 +129,11 @@ static int tiny_open(struct tty_struct *tty, struct file *file)
 	/* get the serial object associated with this tty pointer */
 	index = tty->index;
 	tiny = tiny_table[index];
-	if (tiny == NULL) {
-		/* first time accessing this device, let's create it */
-		tiny = kmalloc(sizeof(*tiny), GFP_KERNEL);
-		if (!tiny)
-			return -ENOMEM;
-
-		mutex_init(&tiny->mutex);
-		tiny->open_count = 0;
-		tiny->timer = NULL;
-
-		tiny_table[index] = tiny;
-	}
-
-	mutex_lock(&tiny->mutex);
 
 	/* save our structure within the tty structure */
 	tty->driver_data = tiny;
-	tiny->tty = tty;
 
-	++tiny->open_count;
-	if (tiny->open_count == 1) {
-		/* this is the first time this port is opened */
-		/* do any hardware initialization needed here */
-
-		/* create our timer and submit it */
-		if (!tiny->timer) {
-			timer = kmalloc(sizeof(*timer), GFP_KERNEL);
-			if (!timer) {
-				mutex_unlock(&tiny->mutex);
-				return -ENOMEM;
-			}
-			tiny->timer = timer;
-		}
-		tiny->timer->data = (unsigned long )tiny;
-		tiny->timer->expires = jiffies + DELAY_TIME;
-		tiny->timer->function = tiny_timer;
-		add_timer(tiny->timer);
-	}
-
-	mutex_unlock(&tiny->mutex);
-	return 0;
-}
-
-static void do_close(struct tiny_serial *tiny)
-{
-	mutex_lock(&tiny->mutex);
-
-	if (!tiny->open_count) {
-		/* port was never opened */
-		goto exit;
-	}
-
-	--tiny->open_count;
-	if (tiny->open_count <= 0) {
-		/* The port is being closed by the last user. */
-		/* Do any hardware specific stuff here */
-
-		/* shut down our timer */
-		del_timer(tiny->timer);
-	}
-exit:
-	mutex_lock(&tiny->mutex);
+	return tty_port_open(&tiny->port, tty, file);
 }
 
 static void tiny_close(struct tty_struct *tty, struct file *file)
@@ -164,7 +141,7 @@ static void tiny_close(struct tty_struct *tty, struct file *file)
 	struct tiny_serial *tiny = tty->driver_data;
 
 	if (tiny)
-		do_close(tiny);
+		tty_port_close(&tiny->port, tty, file);
 }	
 
 static int tiny_write(struct tty_struct *tty, 
@@ -177,22 +154,16 @@ static int tiny_write(struct tty_struct *tty,
 	if (!tiny)
 		return -ENODEV;
 
-	mutex_lock(&tiny->mutex);
-
-	if (!tiny->open_count)
-		/* port was not opened */
-		goto exit;
-
 	/* fake sending the data out a hardware port by
 	 * writing it to the kernel debug log.
 	 */
-	printk(KERN_DEBUG "%s - ", __FUNCTION__);
+	printk("%s: count=%d - ", __func__, count);
 	for (i = 0; i < count; ++i)
-		printk("%02x ", buffer[i]);
+		printk("0x%x ", buffer[i]);
 	printk("\n");
-		
-exit:
-	mutex_unlock(&tiny->mutex);
+
+	retval = count; /* return actual count we write */
+	
 	return retval;
 }
 
@@ -204,18 +175,9 @@ static int tiny_write_room(struct tty_struct *tty)
 	if (!tiny)
 		return -ENODEV;
 
-	mutex_lock(&tiny->mutex);
-	
-	if (!tiny->open_count) {
-		/* port was not opened */
-		goto exit;
-	}
-
 	/* calculate how much room is left in the device */
 	room = 255;
 
-exit:
-	mutex_unlock(&tiny->mutex);
 	return room;
 }
 
@@ -509,12 +471,20 @@ static struct tty_operations serial_ops = {
 	.proc_fops = &tiny_proc_fops,
 };
 
+
+static const struct tty_port_operations tiny_port_ops = {
+	.activate = tiny_activate,
+	.shutdown = tiny_shutdown,
+};
+
 static struct tty_driver *tiny_tty_driver;
 
 static int __init tiny_init(void)
 {
 	int retval;
 	int i;
+	struct tiny_serial *tiny;
+	struct device *tty_dev;
 
 	/* allocate the tty driver */
 	tiny_tty_driver = alloc_tty_driver(TINY_TTY_MINORS);
@@ -541,10 +511,44 @@ static int __init tiny_init(void)
 		return retval;
 	}
 
-	for (i = 0; i < TINY_TTY_MINORS; ++i)
-		tty_register_device(tiny_tty_driver, i, NULL);
+	/* alloc and initialize all struct tiny_serial */
+	for (i = 0; i < TINY_TTY_MINORS; ++i) {
+		tiny = kzalloc(sizeof(*tiny), GFP_KERNEL);
+		if (!tiny) {
+			pr_warn("%s: kzalloc failed.", __func__);
+			retval = -ENOMEM;
+			goto fail;
+		}
 
-	printk(KERN_INFO DRIVER_DESC " " DRIVER_VERSION);
+		tty_port_init(&tiny->port);
+		tiny->port.ops = &tiny_port_ops;
+
+		tiny_table[i] = tiny;
+	}
+
+	for (i = 0; i < TINY_TTY_MINORS; ++i) {
+		tty_dev = tty_port_register_device(&tiny_table[i]->port, tiny_tty_driver, i, NULL);
+		if (IS_ERR(tty_dev)) {
+			pr_warn("%s: tty_port_register_device failed.", __func__);
+            retval = PTR_ERR(tty_dev);
+            for (; i > 0; i--) 
+                tty_unregister_device(tiny_tty_driver, i - 1);
+            goto fail;
+        }
+	}
+
+	printk(KERN_INFO DRIVER_DESC " " DRIVER_VERSION "\n");
+	return retval;
+
+fail:
+	for (i = 0; i < TINY_TTY_MINORS; ++i) {
+		tiny = tiny_table[i];
+		if(tiny) {
+			tty_port_destroy(&tiny->port);
+			kfree(tiny);
+		}
+	}
+
 	return retval;
 }
 
@@ -556,18 +560,20 @@ static void __exit tiny_exit(void)
 	for (i = 0; i < TINY_TTY_MINORS; ++i)
 		tty_unregister_device(tiny_tty_driver, i);
 	tty_unregister_driver(tiny_tty_driver);
+	put_tty_driver(tiny_tty_driver);
 
 	/* shut down all of the timers and free the memory */
 	for (i = 0; i < TINY_TTY_MINORS; ++i) {
 		tiny = tiny_table[i];
 		if (tiny) {
-			/* close the port */
-			while (tiny->open_count)
-				do_close(tiny);
-
 			/* shut down our timer and free the memory */
-			del_timer(tiny->timer);
-			kfree(tiny->timer);
+			if (tiny->timer) {
+				del_timer(tiny->timer);
+				kfree(tiny->timer);
+			}
+			
+			tty_port_destroy(&tiny->port);
+
 			kfree(tiny);
 			tiny_table[i] = NULL;
 		}
