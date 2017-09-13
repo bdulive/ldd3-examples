@@ -34,7 +34,7 @@ MODULE_LICENSE("GPL");
 #define DELAY_TIME		HZ * 2	/* 2 seconds per character */
 #define TINY_DATA_CHARACTER	't'
 
-#define TINY_SERIAL_MAJOR	240	/* experimental range */
+#define TINY_SERIAL_MAJOR	241	/* experimental range */
 #define TINY_SERIAL_MINORS	1	/* only have one minor */
 #define UART_NR			1	/* only use one port */
 
