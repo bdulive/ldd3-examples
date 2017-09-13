@@ -281,14 +281,26 @@ static int __init tiny_init(void)
 	printk(KERN_INFO "Tiny serial driver loaded\n");
 
 	result = uart_register_driver(&tiny_reg);
-	if (result)
+	if (result) {
+		pr_warn("uart_register_driver failed.\n");
 		return result;
+	}
 
 	result = uart_add_one_port(&tiny_reg, &tiny_port);
-	if (result)
+	if (result) {
+		pr_warn("uart_add_one_port failed.\n");
 		uart_unregister_driver(&tiny_reg);
+	}
+}
 
-	return result;
+static void __exit tiny_exit(void)
+{
+	uart_remove_one_port(&tiny_reg, &tiny_port);
+	uart_unregister_driver(&tiny_reg);
+
+	if (!timer)
+	  kfree(timer);
 }
 
 module_init(tiny_init);
+module_exit(tiny_exit);
