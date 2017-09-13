@@ -263,6 +263,7 @@ static struct uart_ops tiny_ops = {
 
 static struct uart_port tiny_port = {
 	.ops		= &tiny_ops,
+	.type		= PORT_16550A,
 };
 
 static struct uart_driver tiny_reg = {
@@ -291,6 +292,8 @@ static int __init tiny_init(void)
 		pr_warn("uart_add_one_port failed.\n");
 		uart_unregister_driver(&tiny_reg);
 	}
+
+	return result;
 }
 
 static void __exit tiny_exit(void)
