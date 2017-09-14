@@ -225,6 +225,7 @@ static int tiny_startup(struct uart_port *port)
 		if (!timer)
 			return -ENOMEM;
 	}
+	init_timer(timer);
 	timer->data = (unsigned long)port;
 	timer->expires = jiffies + DELAY_TIME;
 	timer->function = tiny_timer;
