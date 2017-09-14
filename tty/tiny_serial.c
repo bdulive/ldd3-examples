@@ -42,18 +42,25 @@ MODULE_LICENSE("GPL");
 
 #define MY_NAME			TINY_SERIAL_NAME
 
+#define TINY_CLOCK		3672000
+
+#define pr_enter() do { pr_notice("Enter: %s\n", __func__); } while (0)
+
 static struct timer_list *timer;
 
 static void tiny_stop_tx(struct uart_port *port)
 {
+	pr_enter();
 }
 
 static void tiny_stop_rx(struct uart_port *port)
 {
+	pr_enter();
 }
 
 static void tiny_enable_ms(struct uart_port *port)
 {
+	pr_enter();
 }
 
 static void tiny_tx_chars(struct uart_port *port)
@@ -61,8 +68,10 @@ static void tiny_tx_chars(struct uart_port *port)
 	struct circ_buf *xmit = &port->state->xmit;
 	int count;
 
+	pr_enter();
+
 	if (port->x_char) {
-		pr_debug("wrote %2x", port->x_char);
+		pr_info("x_char wrote 0x%2x", port->x_char);
 		port->icount.tx++;
 		port->x_char = 0;
 		return;
@@ -74,7 +83,7 @@ static void tiny_tx_chars(struct uart_port *port)
 
 	count = port->fifosize >> 1;
 	do {
-		pr_debug("wrote %2x", xmit->buf[xmit->tail]);
+		pr_info("xmit wrote 0x%2x", xmit->buf[xmit->tail]);
 		xmit->tail = (xmit->tail + 1) & (UART_XMIT_SIZE - 1);
 		port->icount.tx++;
 		if (uart_circ_empty(xmit))
@@ -90,6 +99,7 @@ static void tiny_tx_chars(struct uart_port *port)
 
 static void tiny_start_tx(struct uart_port *port)
 {
+	pr_enter();
 }
 
 static void tiny_timer(unsigned long data)
@@ -98,6 +108,7 @@ static void tiny_timer(unsigned long data)
 	struct tty_struct *tty;
 	struct tty_port *tty_port;
 
+	pr_enter();
 
 	port = (struct uart_port *)data;
 	if (!port)
@@ -126,26 +137,33 @@ static void tiny_timer(unsigned long data)
 
 static unsigned int tiny_tx_empty(struct uart_port *port)
 {
+	pr_enter();
 	return 0;
 }
 
 static unsigned int tiny_get_mctrl(struct uart_port *port)
 {
+	pr_enter();
 	return 0;
 }
 
 static void tiny_set_mctrl(struct uart_port *port, unsigned int mctrl)
 {
+	pr_enter();
 }
 
 static void tiny_break_ctl(struct uart_port *port, int break_state)
 {
+	pr_enter();
 }
 
 static void tiny_set_termios(struct uart_port *port,
 			     struct ktermios *new, struct ktermios *old)
 {
 	int baud, quot, cflag = new->c_cflag;
+
+	pr_enter();
+
 	/* get the byte size */
 	switch (cflag & CSIZE) {
 	case CS5:
@@ -165,27 +183,30 @@ static void tiny_set_termios(struct uart_port *port,
 	/* determine the parity */
 	if (cflag & PARENB)
 		if (cflag & PARODD)
-			pr_debug(" - parity = odd\n");
+			pr_info(" - parity = odd\n");
 		else
-			pr_debug(" - parity = even\n");
+			pr_info(" - parity = even\n");
 	else
-		pr_debug(" - parity = none\n");
+		pr_info(" - parity = none\n");
 
 	/* figure out the stop bits requested */
 	if (cflag & CSTOPB)
-		pr_debug(" - stop bits = 2\n");
+		pr_info(" - stop bits = 2\n");
 	else
-		pr_debug(" - stop bits = 1\n");
+		pr_info(" - stop bits = 1\n");
 
 	/* figure out the flow control settings */
 	if (cflag & CRTSCTS)
-		pr_debug(" - RTS/CTS is enabled\n");
+		pr_info(" - RTS/CTS is enabled\n");
 	else
-		pr_debug(" - RTS/CTS is disabled\n");
+		pr_info(" - RTS/CTS is disabled\n");
 
 	/* Set baud rate */
         baud = uart_get_baud_rate(port, new, old, 0, port->uartclk/16);
-        quot = uart_get_divisor(port, baud);
+		if(baud == 0)
+			pr_warn("get baud rate 0\n");
+		else
+			quot = uart_get_divisor(port, baud);
 	
 	//UART_PUT_DIV_LO(port, (quot & 0xff));
 	//UART_PUT_DIV_HI(port, ((quot & 0xf00) >> 8));
@@ -193,6 +214,8 @@ static void tiny_set_termios(struct uart_port *port,
 
 static int tiny_startup(struct uart_port *port)
 {
+	pr_enter();
+
 	/* this is the first time this port is opened */
 	/* do any hardware initialization needed here */
 
@@ -211,6 +234,8 @@ static int tiny_startup(struct uart_port *port)
 
 static void tiny_shutdown(struct uart_port *port)
 {
+	pr_enter();
+
 	/* The port is being closed by the last user. */
 	/* Do any hardware specific stuff here */
 
@@ -220,25 +245,29 @@ static void tiny_shutdown(struct uart_port *port)
 
 static const char *tiny_type(struct uart_port *port)
 {
+	pr_enter();
 	return "tinytty";
 }
 
 static void tiny_release_port(struct uart_port *port)
 {
-
+	pr_enter();
 }
 
 static int tiny_request_port(struct uart_port *port)
 {
+	pr_enter();
 	return 0;
 }
 
 static void tiny_config_port(struct uart_port *port, int flags)
 {
+	pr_enter();
 }
 
 static int tiny_verify_port(struct uart_port *port, struct serial_struct *ser)
 {
+	pr_enter();
 	return 0;
 }
 
@@ -262,6 +291,7 @@ static struct uart_ops tiny_ops = {
 };
 
 static struct uart_port tiny_port = {
+	.uartclk	= TINY_CLOCK,
 	.ops		= &tiny_ops,
 	.type		= PORT_16550A,
 };
