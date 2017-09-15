@@ -20,7 +20,6 @@
 
 /* jc: cleaned up, but not yet run for anything */
 
-#include <linux/config.h>
 #include <linux/module.h>
 #include <linux/init.h>
 #include <linux/moduleparam.h>
@@ -28,7 +27,7 @@
 #include <linux/kernel.h> /* printk */
 #include <linux/ioport.h>
 #include <linux/errno.h>
-#include <asm/system.h> /* cli(), *_flags */
+#include <linux/slab.h>
 #include <linux/mm.h> /* vremap (2.0) */
 #include <asm/io.h> /* ioremap */
 
@@ -47,18 +46,35 @@ EXPORT_SYMBOL (skull_fn2);
 EXPORT_SYMBOL (skull_variable);
 
 
+#define check_region(start,n)   __check_region(&ioport_resource, (start), (n))
+#define check_mem_region(start,n)   __check_region(&iomem_resource, (start), (n))
+
+static int __check_region(struct resource *parent, unsigned long start, unsigned long n)
+{
+    struct resource * res;
+
+    res = __request_region(parent, start, n, "check-region", 0);
+    if (!res)
+        return -EBUSY;
+
+    release_resource(res);
+    kfree(res);
+	return 0;
+}
+
+
 /* perform hardware autodetection */
 int skull_probe_hw(unsigned int port, unsigned int range)
 {
-   /* do smart probing here */
-   return -1; /* not found  :-) */
+	/* do smart probing here */
+	return -1; /* not found  :-) */
 }
 
 /* perform hardware initalizazion */
 int skull_init_board(unsigned int port)
 {
-  /* do smart initalization here */
-  return 0; /* done :-) */
+	/* do smart initalization here */
+	return 0; /* done :-) */
 }
 
 /* detect the the device if the region is still free */
@@ -97,13 +113,12 @@ static int skull_find_hw(void) /* returns the # of devices */
 
     /* loop one time if value assigned, try them all if autodetecting */
     do {
-	if (skull_detect(base, SKULL_PORT_RANGE) == 0) {
-	    skull_init_board(base);
-	    result++;
-	}
-	base += SKULL_PORT_RANGE; /* prepare for next trial */
-    }
-    while (skull_port_base == 0 && base < SKULL_PORT_CEIL);
+		if (skull_detect(base, SKULL_PORT_RANGE) == 0) {
+			skull_init_board(base);
+			result++;
+		}
+		base += SKULL_PORT_RANGE; /* prepare for next trial */
+    } while (skull_port_base == 0 && base < SKULL_PORT_CEIL);
 
     return result;
 }
@@ -128,62 +143,61 @@ int skull_init(void)
     
     /* probe all the memory hole in 2KB steps */
     for (add = ISA_REGION_BEGIN; add < ISA_REGION_END; add += STEP) {
-	/*
-	 * Check for an already allocated region.
-	 */
-	if (check_mem_region (add, 2048)) {
-		printk(KERN_INFO "%lx: Allocated\n", add);
-		continue;
-	}
-	/*
-	 * Read and write the beginning of the region and see what happens.
-	 */
-	save_flags(flags); 
-	cli();
-	oldval = readb (base + add);  /* Read a byte */
-	writeb (oldval^0xff, base + add);
-	mb();
-	newval = readb (base + add);
-	writeb (oldval, base + add);
-	restore_flags(flags);
+		/*
+		 * Check for an already allocated region.
+		 */
+		if (check_mem_region (add, 2048)) {
+			printk(KERN_INFO "%lx: Allocated\n", add);
+			continue;
+		}
+		/*
+		 * Read and write the beginning of the region and see what happens.
+		 */
+		local_irq_save(flags); 
+		oldval = readb (base + add);  /* Read a byte */
+		writeb (oldval^0xff, base + add);
+		mb();
+		newval = readb (base + add);
+		writeb (oldval, base + add);
+		local_irq_restore(flags);
 
-	if ((oldval^newval) == 0xff) {  /* we re-read our change: it's ram */
-	    printk(KERN_INFO "%lx: RAM\n", add);
-	    continue;
-	}
-	if ((oldval^newval) != 0) {  /* random bits changed: it's empty */
-	    printk(KERN_INFO "%lx: empty\n", add);
-	    continue;
-	}
-	
-	/*
-	 * Expansion rom (executed at boot time by the bios)
-	 * has a signature where the first byt is 0x55, the second 0xaa,
-	 * and the third byte indicates the size of such rom
-	 */
-	if ( (oldval == 0x55) && (readb (base + add + 1) == 0xaa)) {
-	    int size = 512 * readb (base + add + 2);
-	    printk(KERN_INFO "%lx: Expansion ROM, %i bytes\n",
-                   add, size);
-	    add += (size & ~2048) - 2048; /* skip it */
-	    continue;
-	}
-	
-	/*
-	 * If the tests above failed, we still don't know if it is ROM or
-	 * empty. Since empty memory can appear as 0x00, 0xff, or the low
-	 * address byte, we must probe multiple bytes: if at least one of
-	 * them is different from these three values, then this is rom
-	 * (though not boot rom).
-	 */
-	printk(KERN_INFO "%lx: ", add);
-	for (i=0; i<5; i++) {
-	    unsigned long radd = add + 57*(i+1);  /* a "random" value */
-	    unsigned char val = readb (base + radd);
-	    if (val && val != 0xFF && val != ((unsigned long) radd&0xFF))
-		break;
-	}    
-	printk("%s\n", i==5 ? "empty" : "ROM");
+		if ((oldval^newval) == 0xff) {  /* we re-read our change: it's ram */
+			printk(KERN_INFO "%lx: RAM\n", add);
+			continue;
+		}
+		if ((oldval^newval) != 0) {  /* random bits changed: it's empty */
+			printk(KERN_INFO "%lx: empty\n", add);
+			continue;
+		}
+		
+		/*
+		 * Expansion rom (executed at boot time by the bios)
+		 * has a signature where the first byt is 0x55, the second 0xaa,
+		 * and the third byte indicates the size of such rom
+		 */
+		if ( (oldval == 0x55) && (readb (base + add + 1) == 0xaa)) {
+			int size = 512 * readb (base + add + 2);
+			printk(KERN_INFO "%lx: Expansion ROM, %i bytes\n",
+					   add, size);
+			add += (size & ~2048) - 2048; /* skip it */
+			continue;
+		}
+		
+		/*
+		 * If the tests above failed, we still don't know if it is ROM or
+		 * empty. Since empty memory can appear as 0x00, 0xff, or the low
+		 * address byte, we must probe multiple bytes: if at least one of
+		 * them is different from these three values, then this is rom
+		 * (though not boot rom).
+		 */
+		printk(KERN_INFO "%lx: ", add);
+		for (i=0; i<5; i++) {
+			unsigned long radd = add + 57*(i+1);  /* a "random" value */
+			unsigned char val = readb (base + radd);
+			if (val && val != 0xFF && val != ((unsigned long) radd&0xFF))
+			break;
+		}    
+		printk("%s\n", i==5 ? "empty" : "ROM");
     }
 
     /*
@@ -197,4 +211,16 @@ int skull_init(void)
     return 0;
 }
 
+void skull_release(unsigned int port, unsigned int range)
+{
+    release_region(port,range);
+}
+
+void skull_cleanup(void)
+{
+    /* should put real values here ... */
+    /* skull_release(0,0); */
+}
+
 module_init(skull_init);
+module_exit(skull_cleanup);
