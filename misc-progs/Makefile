@@ -1,4 +1,3 @@
-
 FILES = nbtest load50 mapcmp polltest mapper setlevel setconsole inp outp \
 	datasize dataalign netifdebug
 

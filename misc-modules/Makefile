@@ -1,4 +1,3 @@
-
 # To build modules outside of the kernel tree, we run "make"
 # in the kernel source tree; the Makefile these then includes this
 # Makefile once again.
