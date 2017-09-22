@@ -40,7 +40,7 @@
 #define SNULL_TX_INTR 0x0002
 
 /* Default timeout period */
-#define SNULL_TIMEOUT 5   /* In jiffies */
+#define SNULL_TX_TIMEOUT (5*HZ)   /* In jiffies */
 
 extern struct net_device *snull_devs[];
 

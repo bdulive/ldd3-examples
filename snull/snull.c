@@ -41,6 +41,7 @@
 MODULE_AUTHOR("Alessandro Rubini, Jonathan Corbet");
 MODULE_LICENSE("Dual BSD/GPL");
 
+#define pr_enter() do { pr_notice("Enter: %s\n", __func__); } while (0)
 
 /*
  * Transmitter lockup simulation, normally disabled.
@@ -48,7 +49,7 @@ MODULE_LICENSE("Dual BSD/GPL");
 static int lockup = 0;
 module_param(lockup, int, 0);
 
-static int timeout = SNULL_TIMEOUT;
+static int timeout = SNULL_TX_TIMEOUT;
 module_param(timeout, int, 0);
 
 /*
@@ -102,6 +103,8 @@ void snull_setup_pool(struct net_device *dev)
 	int i;
 	struct snull_packet *pkt;
 
+	pr_enter();
+
 	priv->ppool = NULL;
 	for (i = 0; i < pool_size; i++) {
 		pkt = kmalloc (sizeof (struct snull_packet), GFP_KERNEL);
@@ -120,6 +123,8 @@ void snull_teardown_pool(struct net_device *dev)
 	struct snull_priv *priv = netdev_priv(dev);
 	struct snull_packet *pkt;
     
+	pr_enter();
+
 	while ((pkt = priv->ppool)) {
 		priv->ppool = pkt->next;
 		kfree (pkt);
@@ -136,6 +141,8 @@ struct snull_packet *snull_get_tx_buffer(struct net_device *dev)
 	unsigned long flags;
 	struct snull_packet *pkt;
     
+	pr_enter();
+
 	spin_lock_irqsave(&priv->lock, flags);
 	pkt = priv->ppool;
 	priv->ppool = pkt->next;
@@ -153,6 +160,8 @@ void snull_release_buffer(struct snull_packet *pkt)
 	unsigned long flags;
 	struct snull_priv *priv = netdev_priv(pkt->dev);
 	
+	pr_enter();
+
 	spin_lock_irqsave(&priv->lock, flags);
 	pkt->next = priv->ppool;
 	priv->ppool = pkt;
@@ -166,6 +175,8 @@ void snull_enqueue_buf(struct net_device *dev, struct snull_packet *pkt)
 	unsigned long flags;
 	struct snull_priv *priv = netdev_priv(dev);
 
+	pr_enter();
+
 	spin_lock_irqsave(&priv->lock, flags);
 	pkt->next = priv->rx_queue;  /* FIXME - misorders packets */
 	priv->rx_queue = pkt;
@@ -177,6 +188,8 @@ struct snull_packet *snull_dequeue_buf(struct net_device *dev)
 	struct snull_priv *priv = netdev_priv(dev);
 	struct snull_packet *pkt;
 	unsigned long flags;
+
+	pr_enter();
 
 	spin_lock_irqsave(&priv->lock, flags);
 	pkt = priv->rx_queue;
@@ -192,6 +205,9 @@ struct snull_packet *snull_dequeue_buf(struct net_device *dev)
 static void snull_rx_ints(struct net_device *dev, int enable)
 {
 	struct snull_priv *priv = netdev_priv(dev);
+
+	pr_enter();
+
 	priv->rx_int_enabled = enable;
 }
 
@@ -202,6 +218,8 @@ static void snull_rx_ints(struct net_device *dev, int enable)
 
 int snull_open(struct net_device *dev)
 {
+	pr_enter();
+
 	/* request_region(), request_irq(), ....  (like fops->open) */
 
 	/* 
@@ -218,6 +236,8 @@ int snull_open(struct net_device *dev)
 
 int snull_stop(struct net_device *dev)
 {
+	pr_enter();
+
     /* release ports, irq and such -- like fops->close */
 
 	netif_stop_queue(dev); /* can't transmit any more */
@@ -229,6 +249,8 @@ int snull_stop(struct net_device *dev)
  */
 int snull_set_config(struct net_device *dev, struct ifmap *map)
 {
+	pr_enter();
+
 	if (dev->flags & IFF_UP) /* can't act on a running interface */
 		return -EBUSY;
 
@@ -255,6 +277,8 @@ void snull_rx(struct net_device *dev, struct snull_packet *pkt)
 {
 	struct sk_buff *skb;
 	struct snull_priv *priv = netdev_priv(dev);
+
+	pr_enter();
 
 	/*
 	 * The packet has been retrieved from the transmission
@@ -293,6 +317,8 @@ static int snull_poll(struct napi_struct *napi, int budget)
 	struct net_device *dev = priv->ndev;
 	struct snull_packet *pkt;
     
+	pr_enter();
+
 	while (npackets < budget && priv->rx_queue) {
 		pkt = snull_dequeue_buf(dev);
 		skb = dev_alloc_skb(pkt->datalen + 2);
@@ -343,6 +369,8 @@ static void snull_regular_interrupt(int irq, void *dev_id, struct pt_regs *regs)
 	struct net_device *dev = (struct net_device *)dev_id;
 	/* ... and check with hw if it's really ours */
 
+	pr_enter();
+
 	/* paranoid */
 	if (!dev)
 		return;
@@ -390,6 +418,8 @@ static void snull_napi_interrupt(int irq, void *dev_id, struct pt_regs *regs)
 	struct net_device *dev = (struct net_device *)dev_id;
 	/* ... and check with hw if it's really ours */
 
+	pr_enter();
+
 	/* paranoid */
 	if (!dev)
 		return;
@@ -436,6 +466,8 @@ static void snull_hw_tx(char *buf, int len, struct net_device *dev)
 	u32 *saddr, *daddr;
 	struct snull_packet *tx_buffer;
     
+	pr_enter();
+
 	/* I am paranoid. Ain't I? */
 	if (len < sizeof(struct ethhdr) + sizeof(struct iphdr)) {
 		printk("snull: Hmm... packet too short (%i octets)\n",
@@ -512,6 +544,8 @@ int snull_start_xmit(struct sk_buff *skb, struct net_device *dev)
 	char *data, shortpkt[ETH_ZLEN];
 	struct snull_priv *priv = netdev_priv(dev);
 	
+	pr_enter();
+
 	data = skb->data;
 	len = skb->len;
 	if (len < ETH_ZLEN) {
@@ -528,7 +562,7 @@ int snull_start_xmit(struct sk_buff *skb, struct net_device *dev)
 	/* actual deliver of data is device-specific, and not shown here */
 	snull_hw_tx(data, len, dev);
 
-	return 0; /* Our simple device can not fail */
+	return NETDEV_TX_OK; /* Our simple device can not fail */
 }
 
 /*
@@ -538,8 +572,8 @@ void snull_tx_timeout (struct net_device *dev)
 {
 	struct snull_priv *priv = netdev_priv(dev);
 
-	PDEBUG("Transmit timeout at %ld, latency %ld\n", jiffies,
-			jiffies - netdev_get_tx_queue(dev, 0)->trans_start;);
+	pr_warn("Transmit timeout at %ld, latency %ld\n", jiffies,
+			jiffies - netdev_get_tx_queue(dev, 0)->trans_start);
         /* Simulate a transmission interrupt to get things moving */
 	priv->status = SNULL_TX_INTR;
 	snull_interrupt(0, dev, NULL);
@@ -555,6 +589,8 @@ void snull_tx_timeout (struct net_device *dev)
  */
 int snull_ioctl(struct net_device *dev, struct ifreq *rq, int cmd)
 {
+	pr_enter();
+
 	PDEBUG("ioctl\n");
 	return 0;
 }
@@ -565,6 +601,9 @@ int snull_ioctl(struct net_device *dev, struct ifreq *rq, int cmd)
 struct net_device_stats *snull_get_stats(struct net_device *dev)
 {
 	struct snull_priv *priv = netdev_priv(dev);
+
+	pr_enter();
+
 	return &priv->stats;
 }
 
@@ -574,6 +613,8 @@ int snull_header(struct sk_buff *skb, struct net_device *dev,
 				const void *saddr, unsigned int len)
 {
 	struct ethhdr *eth = (struct ethhdr *)skb_push(skb,ETH_HLEN);
+
+	pr_enter();
 
 	eth->h_proto = htons(type);
 	memcpy(eth->h_source, saddr ? saddr : dev->dev_addr, dev->addr_len);
@@ -596,6 +637,8 @@ int snull_change_mtu(struct net_device *dev, int new_mtu)
 	struct snull_priv *priv = netdev_priv(dev);
 	spinlock_t *lock = &priv->lock;
     
+	pr_enter();
+
 	/* check ranges */
 	if ((new_mtu < 68) || (new_mtu > 1500))
 		return -EINVAL;
