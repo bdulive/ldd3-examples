@@ -42,6 +42,7 @@
 /* Default timeout period */
 #define SNULL_TX_TIMEOUT (5*HZ)   /* In jiffies */
 
+#define SNULL_NAPI_WEIGHT   2
 extern struct net_device *snull_devs[];
 
 

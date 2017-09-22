@@ -92,7 +92,7 @@ struct snull_priv {
 };
 
 static void snull_tx_timeout(struct net_device *dev);
-static void (*snull_interrupt)(int, void *, struct pt_regs *);
+static irqreturn_t (*snull_interrupt)(int irq, void *dev_id);
 
 /*
  * Set up a device's packet pool.
@@ -356,10 +356,9 @@ static int snull_poll(struct napi_struct *napi, int budget)
 /*
  * The typical interrupt entry point
  */
-static void snull_regular_interrupt(int irq, void *dev_id, struct pt_regs *regs)
+static irqreturn_t snull_regular_interrupt(int irq, void *dev_id)
 {
 	int statusword;
-	struct snull_priv *priv;
 	struct snull_packet *pkt = NULL;
 	/*
 	 * As usual, check the "device" pointer to be sure it is
@@ -367,13 +366,14 @@ static void snull_regular_interrupt(int irq, void *dev_id, struct pt_regs *regs)
 	 * Then assign "struct device *dev"
 	 */
 	struct net_device *dev = (struct net_device *)dev_id;
+	struct snull_priv *priv = netdev_priv(dev);;
 	/* ... and check with hw if it's really ours */
 
 	pr_enter();
 
 	/* paranoid */
 	if (!dev)
-		return;
+		return IRQ_NONE;
 
 	/* Lock the device */
 	priv = netdev_priv(dev);
@@ -400,29 +400,29 @@ static void snull_regular_interrupt(int irq, void *dev_id, struct pt_regs *regs)
 	/* Unlock the device and we are done */
 	spin_unlock(&priv->lock);
 	if (pkt) snull_release_buffer(pkt); /* Do this outside the lock! */
-	return;
+	return IRQ_HANDLED;
 }
 
 /*
  * A NAPI interrupt handler.
  */
-static void snull_napi_interrupt(int irq, void *dev_id, struct pt_regs *regs)
+static irqreturn_t snull_napi_interrupt(int irq, void *dev_id)
 {
 	int statusword;
-	struct snull_priv *priv;
 
 	/*
 	 * As usual, check the "device" pointer for shared handlers.
 	 * Then assign "struct device *dev"
 	 */
 	struct net_device *dev = (struct net_device *)dev_id;
+	struct snull_priv *priv = netdev_priv(dev);
 	/* ... and check with hw if it's really ours */
 
 	pr_enter();
 
 	/* paranoid */
 	if (!dev)
-		return;
+		return IRQ_NONE;
 
 	/* Lock the device */
 	priv = netdev_priv(dev);
@@ -444,7 +444,7 @@ static void snull_napi_interrupt(int irq, void *dev_id, struct pt_regs *regs)
 
 	/* Unlock the device and we are done */
 	spin_unlock(&priv->lock);
-	return;
+	return IRQ_HANDLED;
 }
 
 
@@ -518,7 +518,7 @@ static void snull_hw_tx(char *buf, int len, struct net_device *dev)
 	snull_enqueue_buf(dest, tx_buffer);
 	if (priv->rx_int_enabled) {
 		priv->status |= SNULL_RX_INTR;
-		snull_interrupt(0, dest, NULL);
+		snull_interrupt(0, dest);
 	}
 
 	priv = netdev_priv(dev);
@@ -532,7 +532,7 @@ static void snull_hw_tx(char *buf, int len, struct net_device *dev)
 				(unsigned long) priv->stats.tx_packets);
 	}
 	else
-		snull_interrupt(0, dev, NULL);
+		snull_interrupt(0, dev);
 }
 
 /*
@@ -576,7 +576,7 @@ void snull_tx_timeout (struct net_device *dev)
 			jiffies - netdev_get_tx_queue(dev, 0)->trans_start);
         /* Simulate a transmission interrupt to get things moving */
 	priv->status = SNULL_TX_INTR;
-	snull_interrupt(0, dev, NULL);
+	snull_interrupt(0, dev);
 	priv->stats.tx_errors++;
 	netif_wake_queue(dev);
 	return;
@@ -674,6 +674,8 @@ void snull_init(struct net_device *dev)
 {
 	struct snull_priv *priv;
 
+	pr_enter();
+
 	priv = netdev_priv(dev);
 	memset(priv, 0, sizeof(struct snull_priv));
 	priv->ndev = dev;
@@ -697,7 +699,7 @@ void snull_init(struct net_device *dev)
 	dev->header_ops = &snull_header_ops;
 	dev->watchdog_timeo = timeout;
 	if (use_napi)
-		netif_napi_add(dev, &priv->napi, snull_poll, 2);
+		netif_napi_add(dev, &priv->napi, snull_poll, SNULL_NAPI_WEIGHT);
 	
 	/* keep the default flags, just add NOARP */
 	dev->flags           |= IFF_NOARP;
@@ -727,6 +729,8 @@ void snull_cleanup(void)
 {
 	int i;
     
+	pr_enter();
+
 	for (i = 0; i < 2;  i++) {
 		if (snull_devs[i]) {
 			unregister_netdev(snull_devs[i]);
@@ -754,6 +758,7 @@ int snull_init_module(void)
 	if (snull_devs[0] == NULL || snull_devs[1] == NULL)
 		goto out;
 
+	pr_info("%s: registering netdev\n", __func__);
 	ret = -ENODEV;
 	for (i = 0; i < 2;  i++)
 		if ((result = register_netdev(snull_devs[i])))
