@@ -83,6 +83,7 @@ struct snull_priv {
 	struct net_device_stats stats;
 	int status;
 	struct snull_packet *ppool;
+	int	count; /* pool counter */
 	struct snull_packet *rx_queue;  /* List of incoming packets */
 	int rx_int_enabled;
 	int tx_packetlen;
@@ -141,7 +142,7 @@ struct snull_packet *snull_get_tx_buffer(struct net_device *dev)
 	unsigned long flags;
 	struct snull_packet *pkt;
     
-	pr_enter();
+	pr_notice("%s: snull_devs[%d] rest pool size=%d\n", __func__, (dev == snull_devs[0]) ? 0 : 1, --priv->count);
 
 	spin_lock_irqsave(&priv->lock, flags);
 	pkt = priv->ppool;
@@ -160,7 +161,7 @@ void snull_release_buffer(struct snull_packet *pkt)
 	unsigned long flags;
 	struct snull_priv *priv = netdev_priv(pkt->dev);
 	
-	pr_enter();
+	pr_notice("%s: snull_devs[%d] rest pool size=%d\n", __func__, (pkt->dev == snull_devs[0]) ? 0 : 1, ++priv->count);
 
 	spin_lock_irqsave(&priv->lock, flags);
 	pkt->next = priv->ppool;
@@ -206,7 +207,7 @@ static void snull_rx_ints(struct net_device *dev, int enable)
 {
 	struct snull_priv *priv = netdev_priv(dev);
 
-	pr_enter();
+	pr_notice("%s: snull_devs[%d] %s", __func__, (dev == snull_devs[0]) ? 0 : 1, enable ? "enable" : "disable");
 
 	priv->rx_int_enabled = enable;
 }
@@ -218,6 +219,8 @@ static void snull_rx_ints(struct net_device *dev, int enable)
 
 int snull_open(struct net_device *dev)
 {
+	struct snull_priv *priv = netdev_priv(dev);
+
 	pr_enter();
 
 	/* request_region(), request_irq(), ....  (like fops->open) */
@@ -230,15 +233,24 @@ int snull_open(struct net_device *dev)
 	memcpy(dev->dev_addr, "\0SNUL0", ETH_ALEN);
 	if (dev == snull_devs[1])
 		dev->dev_addr[ETH_ALEN-1]++; /* \0SNUL1 */
+
+	if(use_napi)
+		napi_enable(&priv->napi);
+
 	netif_start_queue(dev);
 	return 0;
 }
 
 int snull_stop(struct net_device *dev)
 {
+	struct snull_priv *priv = netdev_priv(dev);
+
 	pr_enter();
 
     /* release ports, irq and such -- like fops->close */
+
+	if(use_napi)
+		napi_disable(&priv->napi);
 
 	netif_stop_queue(dev); /* can't transmit any more */
 	return 0;
@@ -319,9 +331,11 @@ static int snull_poll(struct napi_struct *napi, int budget)
     
 	pr_enter();
 
+	pr_info("%s: budget=%d\n", __func__, budget);
 	while (npackets < budget && priv->rx_queue) {
+		pr_info("%s: npackets=%d\n", __func__, npackets);
 		pkt = snull_dequeue_buf(dev);
-		skb = netdev_alloc_skb(dev, pkt->datalen + 2);
+		skb = napi_alloc_skb(napi, pkt->datalen + 2);
 		if (! skb) {
 			if (printk_ratelimit())
 				printk(KERN_NOTICE "snull: packet dropped\n");
@@ -528,7 +542,7 @@ static void snull_hw_tx(char *buf, int len, struct net_device *dev)
 	if (lockup && ((priv->stats.tx_packets + 1) % lockup) == 0) {
         	/* Simulate a dropped transmit interrupt */
 		netif_stop_queue(dev);
-		PDEBUG("Simulate lockup at %ld, txp %ld\n", jiffies,
+		pr_info("%s: Simulate lockup at %ld, txp %ld\n", __func__, jiffies,
 				(unsigned long) priv->stats.tx_packets);
 	}
 	else
@@ -680,6 +694,7 @@ void snull_init(struct net_device *dev)
 	memset(priv, 0, sizeof(struct snull_priv));
 	priv->ndev = dev;
 	spin_lock_init(&priv->lock);
+	priv->count = pool_size;
 
 #if 0
     	/*
@@ -758,7 +773,6 @@ int snull_init_module(void)
 	if (snull_devs[0] == NULL || snull_devs[1] == NULL)
 		goto out;
 
-	pr_info("%s: registering netdev\n", __func__);
 	ret = -ENODEV;
 	for (i = 0; i < 2;  i++)
 		if ((result = register_netdev(snull_devs[i])))
