@@ -29,6 +29,7 @@
 /* table of devices that work with this driver */
 static const struct usb_device_id skel_table[] = {
 	{ USB_DEVICE(USB_SKEL_VENDOR_ID, USB_SKEL_PRODUCT_ID) },
+	{ USB_DEVICE(0x0525, 0xa4a0) }, /* Test with g_zero gadget */
 	{ }					/* Terminating entry */
 };
 MODULE_DEVICE_TABLE(usb, skel_table);
